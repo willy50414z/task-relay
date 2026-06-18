@@ -1,0 +1,51 @@
+import os
+
+from task_relay.agents.common import resolve_cli, run_subprocess
+from task_relay.errors import AgentExecutionError
+from task_relay.types import AgentRunRequest, AgentRunResult, TargetStatus
+
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro[1m]"
+DEEPSEEK_SUBAGENT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_EFFORT_LEVEL = "max"
+
+
+class DeepSeekRunner:
+    name = "deepseek"
+
+    def __init__(self, *, default_model: str | None = None, default_effort: str | None = None) -> None:
+        self.default_model = default_model or DEEPSEEK_DEFAULT_MODEL
+        self.default_effort = default_effort or DEEPSEEK_EFFORT_LEVEL
+
+    def run(self, request: AgentRunRequest) -> AgentRunResult:
+        token = os.environ.get("DEEPSEEK_AUTH_TOKEN", "").strip()
+        if not token:
+            raise AgentExecutionError(
+                "DEEPSEEK_AUTH_TOKEN environment variable is required for deepseek target."
+            )
+        model = request.model or self.default_model
+        env = dict(os.environ)
+        env["ANTHROPIC_BASE_URL"] = DEEPSEEK_BASE_URL
+        env["ANTHROPIC_AUTH_TOKEN"] = token
+        env["ANTHROPIC_MODEL"] = model
+        env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = DEEPSEEK_SUBAGENT_MODEL
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = DEEPSEEK_SUBAGENT_MODEL
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = request.effort or self.default_effort
+        command = [resolve_cli("claude"), "--print", "--dangerously-skip-permissions"]
+        if request.model:
+            command.extend(["--model", request.model])
+        stdout = run_subprocess(
+            command,
+            stdin_input=request.prompt,
+            cwd=request.cwd,
+            env=env,
+            encoding=request.encoding,
+            timeout=request.timeout,
+            target=self.name,
+        )
+        return AgentRunResult(stdout=stdout, target=self.name)
+
+    def check(self) -> TargetStatus:
+        return TargetStatus(ok=True)

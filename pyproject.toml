@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "task-relay"
+version = "0.2.0"
+description = "Structured agent task runner with outcome routing via file signals"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+trly = "task_relay.cli:main"
+agent-dispatch = "task_relay.cli:compat_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["task_relay*"]
+
+[tool.setuptools.package-data]
+"task_relay.assets" = ["**/*"]
