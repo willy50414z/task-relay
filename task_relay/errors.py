@@ -22,5 +22,3 @@ class OutcomeResolutionError(TaskRelayError):
     """Workspace outcome files could not be resolved."""
 
 
-class ConfigError(TaskRelayError):
-    """Invalid task-relay configuration."""

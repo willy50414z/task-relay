@@ -6,10 +6,17 @@ from typing import Sequence
 from task_relay.cli.evaluate import handle_evaluate
 from task_relay.cli.health import handle_health
 from task_relay.cli.run import handle_run
-from task_relay.delegation import install_project_guidance, uninstall_project_guidance
+from task_relay.delegation import (
+    InstallResult,
+    clear,
+    install,
+    parse_existing_block,
+    resolve_install_paths,
+    uninstall,
+)
+from task_relay.wizard import run_wizard
 
 AGENT_NAMES = ["claude", "codex", "deepseek"]
-LEVEL_TO_MODE = {1: "hybrid", 2: "delegated-apply"}
 
 
 def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
@@ -36,22 +43,19 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     health_parser.add_argument("--json", action="store_true", required=True)
     health_parser.set_defaults(handler=handle_health)
 
-    install_parser = subparsers.add_parser("install", help="Install project-local OpenSpec delegation guidance.")
-    add_install_args(install_parser)
+    install_parser = subparsers.add_parser("install", help="Install task-relay delegation guidance interactively.")
+    install_parser.add_argument("--primary", choices=["claude", "codex"], help="Primary orchestration agent")
+    install_parser.add_argument("--scope", choices=["user", "project"], help="Installation scope")
+    install_parser.add_argument("--mode", choices=["main", "hybrid", "delegated-apply"], help="Delegation mode")
+    install_parser.add_argument("--sub-agent", choices=["claude", "codex", "deepseek"], help="Delegation sub-agent")
+    install_parser.add_argument("--model", action="append", default=[], metavar="ROLE=MODEL_ID", help="Model for a role (e.g. --model primary=claude-sonnet-4-6 --model sub=deepseek-v4-pro[1m])")
+    install_parser.add_argument("--cwd", help="Working directory (project scope only)")
     install_parser.set_defaults(handler=handle_install)
 
-    uninstall_parser = subparsers.add_parser("uninstall", help="Remove project-local OpenSpec delegation guidance.")
-    uninstall_parser.add_argument("--cwd")
+    uninstall_parser = subparsers.add_parser("uninstall", help="Remove task-relay delegation guidance.")
+    uninstall_parser.add_argument("--scope", choices=["user", "project"], help="Uninstall scope (omit to detect both)")
+    uninstall_parser.add_argument("--cwd", help="Working directory (project scope only)")
     uninstall_parser.set_defaults(handler=handle_uninstall)
-    return parser
-
-
-def compat_build_parser() -> argparse.ArgumentParser:
-    parser = build_parser("agent-dispatch")
-    compat_install = parser._subparsers._group_actions[0].add_parser("install_delegant", help="Compatibility install command.")
-    add_install_args(compat_install)
-    compat_install.add_argument("--uninstall", action="store_true")
-    compat_install.set_defaults(handler=handle_compat_install)
     return parser
 
 
@@ -75,20 +79,8 @@ def add_common_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cwd")
 
 
-def add_install_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--mode", choices=["main", "hybrid", "delegated-apply"])
-    parser.add_argument("--level", type=int, choices=[1, 2])
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--cwd")
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     return _run_main(build_parser(), argv)
-
-
-def compat_main(argv: Sequence[str] | None = None) -> int:
-    print("agent-dispatch is deprecated; use trly instead.", file=sys.stderr)
-    return _run_main(compat_build_parser(), argv)
 
 
 def _run_main(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> int:
@@ -121,51 +113,106 @@ def parse_targets(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def resolve_mode(args) -> str:
-    if args.level is not None:
-        mapped = LEVEL_TO_MODE[args.level]
-        if args.mode is not None and args.mode != mapped:
-            raise ValueError(
-                f"--mode {args.mode} and --level {args.level} are incompatible. Level {args.level} maps to '{mapped}'. Use only --mode."
-            )
-        return mapped
-    if args.mode is not None:
-        return args.mode
-    if args.yes:
-        return "hybrid"
-    if not sys.stdin.isatty():
-        raise ValueError("install requires --mode in non-interactive mode. Use --yes for the recommended hybrid default.")
-    print("Select OpenSpec delegation mode:")
-    print("A) main - all apply work stays with the main model")
-    print("B) hybrid - main model plans/integrates/validates; submodels handle bounded work (recommended)")
-    print("C) delegated-apply - main model delegates apply to a submodel and verifies completion")
-    choice = input("Mode [A/B/C]: ").strip().upper()
-    if choice == "A":
-        return "main"
-    if choice == "B":
-        return "hybrid"
-    if choice == "C":
-        return "delegated-apply"
-    raise ValueError("mode must be A, B, or C")
+def _parse_models(raw: list[str]) -> dict[str, str]:
+    """Parse --model ROLE=MODEL_ID entries into {role: model_id} dict."""
+    models: dict[str, str] = {}
+    for entry in raw:
+        if "=" not in entry:
+            raise ValueError(f"--model must use ROLE=MODEL_ID syntax, got: {entry}")
+        role, _, model = entry.partition("=")
+        role = role.strip()
+        model = model.strip()
+        if not role or not model:
+            raise ValueError(f"--model must use ROLE=MODEL_ID syntax, got: {entry}")
+        if role not in ("primary", "sub"):
+            raise ValueError(f"--model role must be 'primary' or 'sub', got: {role}")
+        models[role] = model
+    return models
 
+
+# ── Handlers ────────────────────────────────────────────────────────
 
 def handle_install(args) -> int:
-    mode = resolve_mode(args)
-    result = install_project_guidance(args.cwd or Path.cwd(), mode)
-    print(f"OpenSpec delegation guidance {result.action}: {result.path}")
-    print(f"Delegation mode: {result.mode}")
-    print("Scope: project-local")
-    return 0
+    cwd = Path(args.cwd) if args.cwd else Path.cwd()
+
+    # Non-interactive: all required flags provided
+    flags_provided = args.primary is not None
+    if flags_provided and args.primary and args.scope and args.mode:
+        primary = args.primary
+        scope = args.scope
+
+        if args.mode == "main":
+            result = clear(primary_agent=primary, scope=scope, cwd=cwd)
+            if result:
+                print(f"Delegation guidance cleared: {result.guidance_path}")
+            else:
+                print("No managed block found to clear.")
+            return 0
+
+        # hybrid or delegated-apply: need sub-agent
+        if not args.sub_agent:
+            print("--sub-agent is required when mode is not 'main'", file=sys.stderr)
+            return 1
+
+        models = _parse_models(args.model)
+        result = install(
+            primary_agent=primary,
+            scope=scope,
+            mode=args.mode,
+            sub_agent=args.sub_agent,
+            models=models,
+            cwd=cwd,
+        )
+        print_summary(result)
+        return 0
+
+    # Partial flags: fall back to wizard
+    if flags_provided:
+        print("Partial flags provided — launching interactive wizard to complete configuration.")
+
+    # Interactive wizard
+    def write_fn(state):
+        install(
+            primary_agent=state.primary_agent,
+            scope=state.scope,
+            mode=state.mode,
+            sub_agent=state.sub_agent,
+            models=state.models,
+            cwd=state.cwd,
+        )
+
+    # Determine prefill path
+    prefill_path = None
+    if args.primary and args.scope:
+        guidance_path, _ = resolve_install_paths(args.primary, args.scope, cwd)
+        if guidance_path.exists():
+            prefill_path = str(guidance_path)
+
+    def clear_fn():
+        if args.primary and args.scope:
+            clear(primary_agent=args.primary, scope=args.scope, cwd=cwd)
+        else:
+            clear(cwd=cwd)
+
+    return run_wizard(write_fn, clear_fn, cwd=cwd, prefill_path=prefill_path)
 
 
 def handle_uninstall(args) -> int:
-    result = uninstall_project_guidance(args.cwd or Path.cwd())
-    print(f"OpenSpec delegation guidance {result.action}: {result.path}")
+    cwd = Path(args.cwd) if args.cwd else Path.cwd()
+
+    results = uninstall(scope=args.scope, cwd=cwd)
+    if not results:
+        print("No task-relay managed blocks found.")
+        return 0
+
+    for result in results:
+        print(f"Removed delegation guidance: {result.guidance_path} (scope: {result.scope})")
     return 0
 
 
-def handle_compat_install(args) -> int:
-    print("agent-dispatch install_delegant is deprecated; use trly install.", file=sys.stderr)
-    if getattr(args, "uninstall", False):
-        return handle_uninstall(args)
-    return handle_install(args)
+def print_summary(result: InstallResult) -> None:
+    print(f"Task-relay delegation guidance {result.action}: {result.guidance_path}")
+    print(f"  Primary agent : {result.primary_agent}")
+    print(f"  Scope         : {result.scope}")
+    print(f"  Mode          : {result.mode}")
+    print(f"  Sub-agent     : {result.sub_agent}")

@@ -12,7 +12,6 @@ dependencies = []
 
 [project.scripts]
 trly = "task_relay.cli:main"
-agent-dispatch = "task_relay.cli:compat_main"
 
 [tool.setuptools.packages.find]
 where = ["."]

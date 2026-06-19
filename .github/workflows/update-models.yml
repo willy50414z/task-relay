@@ -1,0 +1,50 @@
+name: Update Model Catalog
+
+on:
+  schedule:
+    - cron: "37 3 * * 1"  # Monday 3:37 AM UTC
+  workflow_dispatch:
+
+jobs:
+  update-models:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch current models from APIs
+        id: fetch
+        run: |
+          python -m pip install requests
+          python scripts/update_model_catalog.py
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet task_relay/models.py; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No model catalog changes detected."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Model catalog changes detected."
+          fi
+
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: auto/model-catalog-update
+          commit-message: "chore: update model catalog from official APIs"
+          title: "chore: update model catalog"
+          body: |
+            Automated model catalog update from official provider APIs.
+
+            🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          labels: model-update
+          delete-branch: true

@@ -1,259 +1,532 @@
+"""Path resolution, managed block generation, and skill bundle management."""
+
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 import shutil
 
-MANAGED_BLOCK_START = "<!-- task-relay:openspec-delegation:start -->"
-MANAGED_BLOCK_END = "<!-- task-relay:openspec-delegation:end -->"
-DEFAULT_GUIDANCE_FILE = "AGENTS.md"
-SKILL_NAME = "openspec-deepseek-delegation"
-VALID_MODES = ("main", "hybrid", "delegated-apply")
+# ── Marker constants ──────────────────────────────────────────────
 
+MANAGED_BLOCK_START = "<!-- task-relay:start -->"
+MANAGED_BLOCK_END = "<!-- task-relay:end -->"
+LEGACY_BLOCK_START = "<!-- task-relay:openspec-delegation:start -->"
+LEGACY_BLOCK_END = "<!-- task-relay:openspec-delegation:end -->"
+
+SKILL_NAME = "task-relay-delegation"
+
+# Primary agent → guidance file name
+_GUIDANCE_FILE: dict[str, str] = {
+    "claude": "CLAUDE.md",
+    "codex": "AGENTS.md",
+}
+
+# Primary agent → skill dir relative to scope root
+_SKILL_DIR: dict[str, str] = {
+    "claude": ".claude/skills",
+    "codex": ".codex/skills",
+}
+
+
+# ── Public types ───────────────────────────────────────────────────
 
 @dataclass(frozen=True)
-class DelegationInstallResult:
-    path: Path
+class InstallResult:
+    guidance_path: Path
+    primary_agent: str
+    scope: str
     mode: str | None
-    action: str
+    sub_agent: str | None
+    action: str  # "created", "updated", "cleared", "removed", "not-installed"
 
 
-def install_project_guidance(project_dir: str | Path, mode: str) -> DelegationInstallResult:
-    if mode not in VALID_MODES:
-        raise ValueError(f"mode must be one of {', '.join(VALID_MODES)}")
+# ── Path resolution (Group 3) ─────────────────────────────────────
 
-    project_path = Path(project_dir).resolve()
-    guidance_path = project_path / DEFAULT_GUIDANCE_FILE
+def resolve_install_paths(
+    primary_agent: str, scope: str, cwd: str | Path | None = None
+) -> tuple[Path, Path]:
+    """Return (guidance_path, skill_root) for the given primary agent and scope."""
+    project_root = Path(cwd).resolve() if cwd else Path.cwd()
+    guidance_file = _GUIDANCE_FILE.get(primary_agent, "AGENTS.md")
+    skill_subdir = _SKILL_DIR.get(primary_agent, ".codex/skills")
+
+    if scope == "user":
+        base = Path.home() / f".{primary_agent}"
+        guidance_path = base / guidance_file
+        skill_root = Path.home() / skill_subdir
+    else:
+        guidance_path = project_root / guidance_file
+        skill_root = project_root / skill_subdir
+
+    return guidance_path, skill_root
+
+
+def detect_managed_blocks() -> dict[str, list[Path]]:
+    """Scan user and project paths for files containing a task-relay managed block.
+
+    Returns dict mapping scope ("user" | "project") to list of matching paths.
+    """
+    found: dict[str, list[Path]] = {"user": [], "project": []}
+
+    # User scope: ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md
+    for agent, guidance_file in _GUIDANCE_FILE.items():
+        path = Path.home() / f".{agent}" / guidance_file
+        if _has_managed_block(path):
+            found["user"].append(path)
+
+    # Project scope: ./CLAUDE.md, ./AGENTS.md
+    for guidance_file in set(_GUIDANCE_FILE.values()):
+        path = Path.cwd() / guidance_file
+        if _has_managed_block(path):
+            found["project"].append(path)
+
+    return found
+
+
+def _has_managed_block(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+        return (MANAGED_BLOCK_START in text and MANAGED_BLOCK_END in text) or (
+            LEGACY_BLOCK_START in text and LEGACY_BLOCK_END in text
+        )
+    except Exception:
+        return False
+
+
+# ── Managed block generation (Group 4) ─────────────────────────────
+
+def build_guidance_block(
+    primary_agent: str,
+    mode: str,
+    sub_agent: str,
+    models: dict[str, str],
+    scope: str,
+) -> str:
+    """Generate a dynamic managed guidance block from wizard state."""
+    primary_model = models.get("primary", "")
+    sub_model = models.get("sub", "")
+
+    lines = [
+        MANAGED_BLOCK_START,
+        "## Task Relay Delegation",
+        "",
+        f"- primary: {primary_agent}",
+        f"- mode: {mode}",
+        f"- sub-agent: {sub_agent}",
+        f"- scope: {scope}",
+        f"- models:",
+    ]
+    if primary_model:
+        lines.append(f"  - {primary_agent}: {primary_model}")
+    if sub_agent != primary_agent and sub_model:
+        lines.append(f"  - {sub_agent}: {sub_model}")
+    elif sub_agent == primary_agent and sub_model:
+        # Same agent for both roles, list both models
+        lines.append(f"  - {primary_agent} (primary): {primary_model}")
+        lines.append(f"  - {sub_agent} (sub): {sub_model}")
+
+    lines.append("")
+    lines.append(_mode_header(mode, primary_agent, sub_agent))
+    lines.append("")
+    lines.extend(_mode_policy(mode, primary_agent, sub_agent))
+    lines.append("")
+    lines.append(MANAGED_BLOCK_END)
+
+    return "\n".join(lines)
+
+
+def _mode_header(mode: str, primary_agent: str, sub_agent: str) -> str:
+    if mode == "main":
+        return f"Delegation mode: main — all work stays with {primary_agent}."
+    if mode == "hybrid":
+        return f"Delegation mode: hybrid — {primary_agent} orchestrates, {sub_agent} handles bounded delegated work."
+    return f"Delegation mode: delegated-apply — {primary_agent} delegates full apply to {sub_agent} and verifies completion."
+
+
+def _mode_policy(mode: str, primary_agent: str, sub_agent: str) -> list[str]:
+    if mode == "main":
+        return [
+            "All work remains with the primary model. No automatic delegation.",
+        ]
+
+    if mode == "hybrid":
+        return [
+            f"Primary model ({primary_agent}) owns:",
+            "- Architecture, security, data migration, destructive operations, credentials.",
+            "- OpenSpec artifact interpretation, scope, and state changes.",
+            "- Integration of delegated output and final verification.",
+            "",
+            f"Sub-agent ({sub_agent}) handles:",
+            "- Bounded implementation drafts with clear file scope.",
+            "- Small-scope tests and test suggestions.",
+            "- Documentation extraction and summaries.",
+            "- Repetitive edits.",
+            "- Failure diagnosis and first-pass review.",
+            "",
+            "Propose-time task tags for delegation:",
+            f"- `[delegate:{sub_agent}]` — route implementation to sub-agent.",
+            "- `[delegate:test]` — route test authoring.",
+            "- `[delegate:review]` — route review/diagnosis.",
+            "- `[delegate:optional]` — delegate when prompt packet is small.",
+            f"- `[{primary_agent}-only]` — keep in primary agent.",
+            "",
+            f"Use `trly run --target {sub_agent} --prompt-file <packet>` for delegated work.",
+        ]
+
+    return [
+        f"Primary model ({primary_agent}) packages the apply request and delegates",
+        f"implementation to {sub_agent}. The sub-agent produces patches or implementation",
+        "reports for the full eligible apply scope.",
+        "",
+        "The primary model must:",
+        "- Verify tasks, tests, and spec alignment before marking tasks complete.",
+        "- Take over if delegated output is incomplete, unsafe, too broad, or unverifiable.",
+        "- Not let the sub-agent mark tasks checkboxes complete.",
+    ]
+
+
+def _replace_managed_block(text: str, replacement: str) -> str:
+    """Replace the managed block in *text* with *replacement*.
+
+    Handles both current and legacy markers.
+    """
+    for start_marker, end_marker in [
+        (MANAGED_BLOCK_START, MANAGED_BLOCK_END),
+        (LEGACY_BLOCK_START, LEGACY_BLOCK_END),
+    ]:
+        start = text.find(start_marker)
+        end = text.find(end_marker)
+        if start == -1 or end == -1 or end < start:
+            continue
+
+        end += len(end_marker)
+        prefix = text[:start].rstrip()
+        suffix = text[end:].lstrip()
+        parts = [p for p in (prefix, replacement.strip(), suffix) if p]
+        return "\n\n".join(parts) + ("\n" if parts else "")
+
+    raise ValueError("No managed block found in text")
+
+
+def parse_existing_block(path: Path) -> dict | None:
+    """Extract configuration from an existing managed block.
+
+    Returns None if no block is found or parsing fails.
+    """
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    for start_marker, end_marker in [
+        (MANAGED_BLOCK_START, MANAGED_BLOCK_END),
+        (LEGACY_BLOCK_START, LEGACY_BLOCK_END),
+    ]:
+        si = text.find(start_marker)
+        ei = text.find(end_marker)
+        if si == -1 or ei == -1 or ei < si:
+            continue
+
+        block = text[si + len(start_marker):ei]
+        result: dict = {}
+        in_models = False
+        for line in block.strip().splitlines():
+            stripped = line.strip()
+            kv = stripped.removeprefix("- ").strip()
+            if ":" not in kv:
+                continue
+            key, _, value = kv.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if key == "primary":
+                result["primary"] = value
+            elif key == "mode":
+                result["mode"] = value
+            elif key == "sub-agent":
+                result["sub_agent"] = value
+            elif key == "scope":
+                result["scope"] = value
+            elif key == "models":
+                in_models = True
+                continue
+            elif in_models and key and value:
+                result.setdefault("models", {})[key] = value
+        return result if result else None
+
+    return None
+
+
+# ── Skill bundle management (Group 5) ──────────────────────────────
+
+def install_skill_bundle(
+    skill_root: Path,
+    primary_agent: str,
+    sub_agent: str,
+    models: dict[str, str],
+) -> None:
+    """Write the task-relay-delegation skill bundle to *skill_root*.
+
+    Creates/replaces <skill_root>/task-relay-delegation/.
+    """
+    bundle_root = skill_root / SKILL_NAME
+    if bundle_root.exists():
+        shutil.rmtree(bundle_root)
+    bundle_root.mkdir(parents=True, exist_ok=True)
+
+    # SKILL.md (dynamic)
+    bundle_root.joinpath("SKILL.md").write_text(
+        _build_skill_md(primary_agent, sub_agent, models), encoding="utf-8"
+    )
+
+    # Agent config
+    agents_dir = bundle_root / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    _write_agent_config(agents_dir, sub_agent)
+
+    # Templates (from package assets)
+    templates_dir = bundle_root / "templates"
+    templates_dir.mkdir(exist_ok=True)
+    _copy_templates(templates_dir)
+
+
+def remove_skill_bundle(skill_root: Path) -> bool:
+    """Remove the task-relay-delegation skill directory. Returns True if removed."""
+    bundle_root = skill_root / SKILL_NAME
+    if bundle_root.exists():
+        shutil.rmtree(bundle_root)
+        return True
+    return False
+
+
+def _build_skill_md(primary_agent: str, sub_agent: str, models: dict[str, str]) -> str:
+    primary_model = models.get("primary", "default")
+    sub_model = models.get("sub", "default")
+
+    return "\n".join(
+        [
+            "---",
+            f"name: {SKILL_NAME}",
+            "description: Delegation skill for task-relay managed OpenSpec workflows.",
+            "---",
+            "",
+            "## Task Relay Delegation",
+            "",
+            f"This project uses task-relay delegation with **{primary_agent}** as the primary",
+            f"orchestration agent and **{sub_agent}** for delegated draft work.",
+            "",
+            "### Agent Configuration",
+            "",
+            f"- Primary: {primary_agent} (model: {primary_model})",
+            f"- Sub-agent: {sub_agent} (model: {sub_model})",
+            "",
+            "### Output Modes",
+            "",
+            "When receiving a delegation prompt packet, produce ONE of:",
+            "",
+            "- **implementation-draft**: A patch or file-by-file edit plan.",
+            "- **test-draft**: Tests to add and the command to run them.",
+            "- **review**: Findings against a diff or spec, with severity.",
+            "- **diagnosis**: Likely root cause and next fix for a failing command.",
+            "",
+            "Return only the requested output. Do not modify OpenSpec state or mark tasks complete.",
+        ]
+    )
+
+
+def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
+    if sub_agent == "codex":
+        # Copy openai.yaml from assets
+        try:
+            source = resources.files("task_relay.assets").joinpath(
+                f"{SKILL_NAME}/agents/openai.yaml"
+            )
+            if source.is_file():
+                agents_dir.joinpath("openai.yaml").write_text(
+                    source.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                return
+        except Exception:
+            pass
+
+    # Fallback: write minimal config
+    config_name = {"codex": "openai.yaml", "claude": "claude.yaml", "deepseek": "deepseek.yaml"}.get(
+        sub_agent, f"{sub_agent}.yaml"
+    )
+    agents_dir.joinpath(config_name).write_text(
+        f"# Agent configuration for {sub_agent}\n", encoding="utf-8"
+    )
+
+
+def _copy_templates(templates_dir: Path) -> None:
+    templates = {
+        "implementation-draft.md": "# Implementation Draft\n\n",
+        "test-draft.md": "# Test Draft\n\n",
+        "review.md": "# Review Findings\n\n",
+        "diagnosis.md": "# Diagnosis\n\n",
+    }
+
+    # Try to copy from assets first
+    try:
+        asset_root = resources.files("task_relay.assets").joinpath(f"{SKILL_NAME}/templates")
+        for name in templates:
+            source = asset_root.joinpath(name)
+            if source.is_file():
+                templates_dir.joinpath(name).write_text(
+                    source.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                continue
+            templates_dir.joinpath(name).write_text(templates[name], encoding="utf-8")
+        return
+    except Exception:
+        pass
+
+    for name, content in templates.items():
+        templates_dir.joinpath(name).write_text(content, encoding="utf-8")
+
+
+# ── High-level install / uninstall ─────────────────────────────────
+
+def install(
+    primary_agent: str,
+    scope: str,
+    mode: str,
+    sub_agent: str,
+    models: dict[str, str],
+    cwd: str | Path | None = None,
+) -> InstallResult:
+    """Install delegation guidance for the given configuration."""
+    guidance_path, skill_root = resolve_install_paths(primary_agent, scope, cwd)
+
     existing = guidance_path.read_text(encoding="utf-8") if guidance_path.exists() else ""
-    block = build_guidance_block(mode)
+    block = build_guidance_block(primary_agent, mode, sub_agent, models, scope)
 
-    if MANAGED_BLOCK_START in existing or MANAGED_BLOCK_END in existing:
+    if _has_managed_block(guidance_path):
         updated = _replace_managed_block(existing, block)
         action = "updated"
     else:
         prefix = existing.rstrip()
-        if prefix:
-            updated = f"{prefix}\n\n{block}\n"
-            action = "appended"
-        else:
-            updated = f"# Agent Guidance\n\n{block}\n"
-            action = "created"
+        updated = f"{prefix}\n\n{block}\n" if prefix else f"# Agent Guidance\n\n{block}\n"
+        action = "created"
 
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
     guidance_path.write_text(updated, encoding="utf-8")
-    _install_skill_bundle(project_path, mode)
-    return DelegationInstallResult(path=guidance_path, mode=mode, action=action)
 
+    install_skill_bundle(skill_root, primary_agent, sub_agent, models)
 
-def uninstall_project_guidance(project_dir: str | Path) -> DelegationInstallResult:
-    project_path = Path(project_dir).resolve()
-    guidance_path = project_path / DEFAULT_GUIDANCE_FILE
-    if not guidance_path.exists():
-        _remove_skill_bundle(project_path)
-        return DelegationInstallResult(path=guidance_path, mode=None, action="not-installed")
-
-    existing = guidance_path.read_text(encoding="utf-8")
-    if MANAGED_BLOCK_START not in existing and MANAGED_BLOCK_END not in existing:
-        _remove_skill_bundle(project_path)
-        return DelegationInstallResult(path=guidance_path, mode=None, action="not-installed")
-
-    updated = _replace_managed_block(existing, "").strip()
-    if updated:
-        guidance_path.write_text(f"{updated}\n", encoding="utf-8")
-    else:
-        guidance_path.unlink()
-
-    _remove_skill_bundle(project_path)
-    return DelegationInstallResult(path=guidance_path, mode=None, action="removed")
-
-
-def build_guidance_block(mode: str) -> str:
-    if mode not in VALID_MODES:
-        raise ValueError(f"mode must be one of {', '.join(VALID_MODES)}")
-
-    return "\n".join(
-        [
-            MANAGED_BLOCK_START,
-            "## OpenSpec Delegation Policy",
-            "",
-            _mode_header(mode),
-            "",
-            _mode_policy(mode),
-            "",
-            "When working on OpenSpec propose/apply tasks under a delegation-enabled mode:",
-            "- During propose, use lightweight task tags in `tasks.md`:",
-            "  `[delegate:deepseek]`, `[delegate:test]`, `[delegate:review]`,",
-            "  `[delegate:optional]`, and `[codex-only]`.",
-            "- During apply, inspect the current task tag before implementation.",
-            "  `[codex-only]` stays in Codex. `[delegate:deepseek]` routes to",
-            "  implementation drafts. `[delegate:test]` routes to test drafts.",
-            "  `[delegate:review]` routes to review or failure diagnosis.",
-            "  `[delegate:optional]` is delegated when the prompt packet is small.",
-            "- Use lower-cost submodels only for bounded, low-risk, verifiable draft work.",
-            "- Keep architecture, security, migrations, credentials, destructive operations,",
-            "  and OpenSpec state changes in Codex unless the user explicitly says otherwise.",
-            "- Build minimal delegation prompt packets: task text, relevant artifact excerpts,",
-            "  relevant file excerpts, expected output format, and verification commands.",
-            "- Use these output modes for prompt packets: `implementation-draft` returns a",
-            "  patch or file-by-file edit plan; `test-draft` returns tests to add and run;",
-            "  `review` returns findings against the diff/spec; `diagnosis` returns likely",
-            "  root cause and next fix for a failing command.",
-            "- Use `trly run --target deepseek --prompt-file <packet>` for delegated",
-            "  draft/review/diagnosis work unless a task packet names another target or",
-            "  DeepSeek is unavailable.",
-            "- Submodels must not change OpenSpec scope or mark `tasks.md` checkboxes complete.",
-            "- Codex reviews delegated output, integrates changes, runs final verification,",
-            "  and is the only actor that marks OpenSpec tasks complete.",
-            "- If delegated output is unavailable, malformed, too broad, stale, or inconsistent,",
-            "  Codex takes over after one unusable attempt unless the failure is mechanical.",
-            "- Record delegation decisions or overrides near the relevant task in `tasks.md`",
-            "  when the workflow uses delegated draft work.",
-            "",
-            "Propose-time task packets for submodel delegation:",
-            "- Split delegate-friendly work into standalone tasks with enough local context",
-            "  that a submodel can avoid reading all OpenSpec artifacts.",
-            "- Use multi-line task entries for submodel-eligible work:",
-            "  ```md",
-            "  - [ ] 2.2 [delegate:test] Add CLI tests for `--mode hybrid`",
-            "    - context: `tests/test_cli.py`, `task_relay/delegation.py`",
-            "    - output: focused tests for install/update behavior",
-            "    - verify: `pytest tests/test_cli.py`",
-            "  ```",
-            "- The `context` field lists the minimal files or artifacts the submodel must read.",
-            "- The `output` field describes what the submodel should produce.",
-            "- The `verify` field gives the command or check that confirms the output is usable.",
-            "- Keep the checkbox line in the standard `- [ ]` format so OpenSpec task parsing",
-            "  remains intact. Put packet fields as indented notes under the checkbox.",
-            "- Use multi-line packets only when they reduce submodel context load. Simple",
-            "  `[codex-only]` or trivial tasks can remain one-line checkboxes.",
-            "",
-            "The compatibility command `agent-dispatch` is deprecated and planned for removal in v0.3.0.",
-            MANAGED_BLOCK_END,
-        ]
+    return InstallResult(
+        guidance_path=guidance_path,
+        primary_agent=primary_agent,
+        scope=scope,
+        mode=mode,
+        sub_agent=sub_agent,
+        action=action,
     )
 
 
-def _mode_header(mode: str) -> str:
-    if mode == "main":
-        return "Delegation mode: main - no automatic submodel delegation."
-    if mode == "hybrid":
-        return "Delegation mode: hybrid - propose-time task routing plus delegation-first apply for tagged work."
-    return "Delegation mode: delegated-apply - main model delegates apply implementation to a submodel and verifies completion."
+def clear(
+    primary_agent: str | None = None,
+    scope: str | None = None,
+    cwd: str | Path | None = None,
+) -> InstallResult | None:
+    """Clear the managed block from guidance files (mode: main)."""
+    project_root = Path(cwd).resolve() if cwd else Path.cwd()
 
-
-def _mode_policy(mode: str) -> str:
-    if mode == "main":
-        return "\n".join(
-            [
-                "Mode A / main: all OpenSpec apply work remains with the main model.",
-                "Do not delegate any apply tasks to submodels unless the user explicitly",
-                "asks for it on a specific task. This mode keeps all context in the main",
-                "session and disables automatic delegation.",
-            ]
+    if primary_agent and scope:
+        guidance_path, skill_root = resolve_install_paths(primary_agent, scope, project_root)
+        if not guidance_path.exists():
+            return None
+        existing = guidance_path.read_text(encoding="utf-8")
+        if not _has_managed_block(guidance_path):
+            return None
+        cleared = _replace_managed_block(existing, "").strip()
+        if cleared:
+            guidance_path.write_text(f"{cleared}\n", encoding="utf-8")
+        else:
+            guidance_path.unlink()
+        remove_skill_bundle(skill_root)
+        return InstallResult(
+            guidance_path=guidance_path,
+            primary_agent=primary_agent,
+            scope=scope,
+            mode="main",
+            sub_agent=None,
+            action="cleared",
         )
 
-    if mode == "hybrid":
-        return "\n".join(
-            [
-                "Mode B / hybrid: the recommended delegation-first cost-control default.",
-                "",
-                "Main model owns:",
-                "- OpenSpec artifact interpretation, scope, and architecture decisions.",
-                "- Architecture, security, data migration, destructive operations,",
-                "  credentials, and other high-risk decisions.",
-                "- Integration of delegated output into the working tree.",
-                "- Large feature acceptance and final tests.",
-                "- `tasks.md` checkbox updates and OpenSpec state changes.",
-                "",
-                "Hybrid mandatory delegation rules:",
-                "- During OpenSpec propose, Codex MUST assign delegate-friendly implementation,",
-                "  test, review, documentation extraction, repetitive edit, and diagnosis work",
-                "  to standalone delegate task packets.",
-                "- Delegate-friendly means bounded file scope, clear expected output, and an",
-                "  independently verifiable command or review check.",
-                "- During apply, Codex MUST attempt delegation for every `[delegate:deepseek]`,",
-                "  `[delegate:test]`, and `[delegate:review]` task before implementing it directly.",
-                "- Do not skip a tagged delegate task merely because it is small, trivial, or",
-                "  faster for Codex to do directly.",
-                "- Codex may skip or take over only when the task is high-risk, needs broad repo",
-                "  context, the delegation backend is unavailable, or one delegated attempt",
-                "  returns unusable output.",
-                "- Record the concrete skip/takeover reason near the relevant task in `tasks.md`.",
-                "- During apply, split each OpenSpec change into the smallest practical work",
-                "  packets before acting: implementation, test authoring, test execution,",
-                "  verification, and diagnosis. Keep the integration step in Codex, but delegate",
-                "  bounded draft work whenever a task can be verified from a file, test, or log.",
-                "- If a task can be proven by a focused test or command output, prefer having",
-                "  Codex write the test or command description and letting a submodel execute or",
-                "  inspect the result when that reduces context load.",
-                "- When a delegated task needs verification, have the submodel return either a",
-                "  concise patch plan, a test plan, or a log/output summary. Codex then reviews",
-                "  the result, integrates the changes, and performs the final acceptance check.",
-                "",
-                "Submodels are assigned:",
-                "- Implementation drafts with clear file scope.",
-                "- Small-scope tests and test suggestions.",
-                "- Documentation reading, extraction, and summaries.",
-                "- Repetitive edits.",
-                "- Failure diagnosis.",
-                "- First-pass diff/spec review.",
-            ]
-        )
-
-    return "\n".join(
-        [
-            "Mode C / delegated-apply: full delegated apply with main-model verification.",
-            "",
-            "The main model packages the apply request and delegates implementation to",
-            "a submodel. The submodel may produce a patch or implementation report for",
-            "the full eligible apply scope.",
-            "",
-            "The main model must:",
-            "- Verify that tasks, tests, and spec alignment are complete before marking",
-            "  tasks complete.",
-            "- Take over if delegated output is incomplete, unsafe, too broad, or",
-            "  unverifiable.",
-            "- Not let submodels mark `tasks.md` checkboxes complete.",
-        ]
-    )
+    # No explicit primary/scope: try all known locations
+    result = None
+    for agent, file_name in _GUIDANCE_FILE.items():
+        for s, base in [("user", Path.home() / f".{agent}"), ("project", project_root)]:
+            path = base / file_name
+            skill_root = base / _SKILL_DIR.get(agent, ".codex/skills")
+            if not path.exists():
+                continue
+            try:
+                existing = path.read_text(encoding="utf-8")
+                if not _has_managed_block(path):
+                    continue
+                cleared = _replace_managed_block(existing, "").strip()
+                if cleared:
+                    path.write_text(f"{cleared}\n", encoding="utf-8")
+                else:
+                    path.unlink()
+                remove_skill_bundle(skill_root)
+                result = InstallResult(
+                    guidance_path=path,
+                    primary_agent=agent,
+                    scope=s,
+                    mode="main",
+                    sub_agent=None,
+                    action="cleared",
+                )
+            except Exception:
+                continue
+    return result
 
 
-def _replace_managed_block(text: str, replacement: str) -> str:
-    start = text.find(MANAGED_BLOCK_START)
-    end = text.find(MANAGED_BLOCK_END)
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("managed OpenSpec delegation block is malformed")
+def uninstall(
+    scope: str | None = None, cwd: str | Path | None = None
+) -> list[InstallResult]:
+    """Remove delegation guidance. Returns list of results for each file processed."""
+    project_root = Path(cwd).resolve() if cwd else Path.cwd()
+    results: list[InstallResult] = []
 
-    end += len(MANAGED_BLOCK_END)
-    prefix = text[:start].rstrip()
-    suffix = text[end:].lstrip()
-    parts = [part for part in (prefix, replacement.strip(), suffix) if part]
-    return "\n\n".join(parts) + ("\n" if parts else "")
+    for agent, file_name in _GUIDANCE_FILE.items():
+        candidates: list[tuple[str, Path]] = []
+        if scope is None or scope == "user":
+            candidates.append(("user", Path.home() / f".{agent}" / file_name))
+        if scope is None or scope == "project":
+            candidates.append(("project", project_root / file_name))
 
+        for s, path in candidates:
+            if not path.exists():
+                continue
+            try:
+                existing = path.read_text(encoding="utf-8")
+                if not _has_managed_block(path):
+                    continue
+                cleared = _replace_managed_block(existing, "").strip()
+                if cleared:
+                    path.write_text(f"{cleared}\n", encoding="utf-8")
+                else:
+                    path.unlink()
+                skill_root = path.parent.parent if s == "user" else project_root
+                skill_root = skill_root / _SKILL_DIR.get(agent, ".codex/skills")
+                remove_skill_bundle(skill_root)
+                results.append(
+                    InstallResult(
+                        guidance_path=path,
+                        primary_agent=agent,
+                        scope=s,
+                        mode=None,
+                        sub_agent=None,
+                        action="removed",
+                    )
+                )
+            except Exception:
+                continue
 
-def _install_skill_bundle(project_path: Path, mode: str) -> None:
-    if mode not in {"hybrid", "delegated-apply"}:
-        return
-
-    skill_root = project_path / ".codex" / "skills" / SKILL_NAME
-    if skill_root.exists():
-        shutil.rmtree(skill_root)
-    skill_root.mkdir(parents=True, exist_ok=True)
-
-    asset_root = resources.files("task_relay.assets").joinpath(SKILL_NAME)
-    for relative_path in (
-        "SKILL.md",
-        "agents/openai.yaml",
-        "templates/implementation-draft.md",
-        "templates/test-draft.md",
-        "templates/review.md",
-        "templates/diagnosis.md",
-    ):
-        target_path = skill_root / relative_path
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        source_file = asset_root.joinpath(relative_path)
-        target_path.write_text(source_file.read_text(encoding="utf-8"), encoding="utf-8")
-
-
-def _remove_skill_bundle(project_path: Path) -> None:
-    skill_root = project_path / ".codex" / "skills" / SKILL_NAME
-    if skill_root.exists():
-        shutil.rmtree(skill_root)
+    return results

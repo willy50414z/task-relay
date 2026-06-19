@@ -5,7 +5,6 @@ from task_relay.errors import (
     AgentNotFoundError,
     AgentQuotaError,
     AgentTimeoutError,
-    ConfigError,
     OutcomeResolutionError,
     TaskRelayError,
 )
@@ -16,7 +15,6 @@ __all__ = [
     "AgentNotFoundError",
     "AgentQuotaError",
     "AgentTimeoutError",
-    "ConfigError",
     "JobResult",
     "Outcome",
     "OutcomeResolutionError",

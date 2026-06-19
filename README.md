@@ -2,25 +2,51 @@
 
 `task-relay` — structured agent task runner with outcome routing via file signals.
 
+Run prompts against local AI agent CLIs (`claude`, `codex`, `deepseek`) with automatic fallback, workspace-isolated output collection, and outcome-based callback routing.
+
+## Requirements
+
+- Python 3.11 or newer
+- One or more supported agent CLIs on PATH:
+  - **Claude Code** (`claude`) — installed via npm: `npm install -g @anthropic-ai/claude-code`
+  - **OpenAI Codex** (`codex`) — installed via npm: `npm install -g @openai/codex`
+  - **DeepSeek** — uses the Claude CLI bridge pointed at `https://api.deepseek.com/anthropic`; requires `DEEPSEEK_AUTH_TOKEN` environment variable
+
 ## Install
 
+### Editable install (development)
+
 ```bash
+git clone <repo-url> task-relay
+cd task-relay
 python -m pip install -e .
-trly --help
 ```
 
-Requires Python 3.11 or newer. Supported local CLIs in v0.2 are `claude`, `codex`, and `deepseek` via the Claude CLI bridge.
+### Verify
+
+```bash
+trly --help
+trly health --json
+```
 
 ## Quick start
+
+### Python API — `evaluate()`
+
+The primary API. Runs a prompt against an agent, collects output files written to a temp workspace, resolves which outcome matched, and fires the corresponding callback.
 
 ```python
 from task_relay import Outcome, evaluate
 
 evaluate(
     target="claude",
-    purpose="Review this spec.",
+    purpose="Review this spec and write questions to questions.txt if gaps exist.",
     outcomes=[
-        Outcome(status="complete", description="The spec is complete", callback=lambda result: None),
+        Outcome(
+            status="complete",
+            description="The spec is complete",
+            callback=lambda result: print("Done!"),
+        ),
         Outcome(
             status="incomplete",
             description="The spec has gaps",
@@ -31,22 +57,370 @@ evaluate(
 )
 ```
 
-## CLI
+### Python API — `run()`
 
-```bash
-trly run --target claude --prompt "hello"
-trly evaluate --target codex --purpose "review this" --outcome complete="Done" --json
-trly health --json
-trly install --mode hybrid --cwd .
-trly uninstall --cwd .
+Raw prompt execution without outcome routing. Returns the agent's stdout directly.
+
+```python
+from task_relay import run
+
+output = run(
+    target="claude",
+    prompt="Write a haiku about code review.",
+)
+print(output)
 ```
 
-## Migration
+### CLI
 
-- Canonical package: `task_relay`
-- Canonical CLI: `trly`
+```bash
+# Raw prompt execution
+trly run --target claude --prompt "Write a haiku about code review."
 
-## v0.2 Non-goals
+# From a file
+trly run --target codex --prompt-file instructions.txt
+
+# From stdin
+echo "Explain monads." | trly run --target deepseek --stdin
+
+# Outcome-routed evaluation (emits JSON)
+trly evaluate \
+  --target claude \
+  --purpose "Review README.md. If complete, write 'OK' to done.txt. If gaps exist, write questions to questions.txt." \
+  --outcome complete="All done" \
+  --output-file complete=done.txt \
+  --outcome incomplete="Gaps found" \
+  --output-file incomplete=questions.txt \
+  --json
+
+# Check agent availability
+trly health --json
+trly health --target deepseek --json
+
+# Install delegation guidance (interactive wizard)
+trly install
+
+# Non-interactive install
+trly install --primary codex --scope project --mode hybrid --sub-agent deepseek \
+  --model primary=gpt-5.5-medium --model sub=deepseek-v4-pro[1m]
+
+# Uninstall delegation guidance
+trly uninstall
+trly uninstall --scope project
+```
+
+## Python API reference
+
+### `task_relay.run()`
+
+Send a raw prompt to an agent and return its stdout.
+
+```python
+def run(
+    target: str | None = None,       # Single agent name: "claude", "codex", "deepseek"
+    prompt: str = "",                 # The prompt text (required, non-empty)
+    *,
+    targets: list[str] | None = None, # Ordered fallback list, e.g. ["claude", "codex"]
+    model: str | None = None,         # Override the default model
+    effort: str | None = None,        # Reasoning effort level
+    timeout: float = 1800,            # Subprocess timeout in seconds
+    cwd: str | None = None,           # Working directory for the agent
+) -> str
+```
+
+One of `target` or `targets` is required (mutually exclusive). When `targets` is a list, each target is tried in order — if one fails with a quota or execution error, the next is used as fallback.
+
+### `task_relay.evaluate()`
+
+Run a prompt with outcome routing. The agent writes status files and output files into a temp workspace; task-relay matches them against declared outcomes and fires the winner's callback.
+
+```python
+def evaluate(
+    target: str | None,               # Single agent name
+    purpose: PurposeInput,            # str or Callable[[Path], str] — prompt text
+    outcomes: list[Outcome],          # Declared outcomes (required, non-empty)
+    *,
+    targets: list[str] | None = None, # Ordered fallback list
+    on_exception: Callable | None = None,  # If set, exceptions call this instead of raising
+    model: str | None = None,
+    effort: str | None = None,
+    timeout: float = 1800,
+    cwd: str | None = None,
+) -> None
+```
+
+When `purpose` is a callable, it receives the workspace `Path` and returns the prompt string — useful for dynamic prompts that reference workspace paths.
+
+### `task_relay.evaluate_result()`
+
+Like `evaluate()` but returns the resolved `JobResult` instead of calling a callback. Useful when you want to inspect the result programmatically.
+
+```python
+def evaluate_result(
+    targets: list[str],               # Required list of agent names
+    purpose: str,                     # Prompt text
+    outcomes: list[Outcome],
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    timeout: float = 1800,
+    cwd: str | None = None,
+) -> JobResult
+```
+
+### `task_relay.check_target()`
+
+Check whether a single agent is available and authenticated.
+
+```python
+from task_relay import check_target
+
+status = check_target("claude")
+print(status.ok)      # bool
+print(status.reason)  # str | None
+```
+
+### `task_relay.check_all()`
+
+Check all three built-in agents at once.
+
+```python
+from task_relay import check_all
+
+statuses = check_all()
+# {"claude": TargetStatus(ok=True), "codex": TargetStatus(ok=False, reason="..."), ...}
+```
+
+## Data types
+
+### `Outcome`
+
+```python
+@dataclass(frozen=True)
+class Outcome:
+    description: str                              # Human-readable description
+    callback: Callable[[JobResult], None]         # Called when this outcome matches
+    status: str | None = None                     # Status key; defaults to str(index)
+    output_files: list[str] | None = None         # Files the agent must write for this outcome
+```
+
+### `JobResult`
+
+```python
+@dataclass(frozen=True)
+class JobResult:
+    job_id: str                # 8-char hex workspace ID
+    status: str                # Matched outcome status key
+    target: str                # Which agent ran (claude/codex/deepseek)
+    duration_seconds: float    # Wall-clock duration
+    files: dict[str, bytes]    # Output file name -> raw bytes
+    stdout: str                # Full agent stdout
+```
+
+### `TargetStatus`
+
+```python
+@dataclass(frozen=True)
+class TargetStatus:
+    ok: bool
+    reason: str | None = None
+```
+
+### `AgentRunRequest` / `AgentRunResult`
+
+Internal types used to pass execution parameters and results between layers.
+
+### `PurposeInput`
+
+```python
+PurposeInput = str | Callable[[Path], str]
+```
+
+A string prompt or a callable that receives the workspace path and returns the prompt.
+
+## Error types
+
+All errors inherit from `TaskRelayError(RuntimeError)`.
+
+| Error | Description |
+|---|---|
+| `TaskRelayError` | Base error for all task-relay failures |
+| `AgentNotFoundError` | Unknown or unsupported agent name |
+| `AgentExecutionError` | Agent subprocess or runtime failure |
+| `AgentTimeoutError` | Agent subprocess timed out (subclass of `AgentExecutionError`) |
+| `AgentQuotaError` | Agent failed due to quota or rate limiting (subclass of `AgentExecutionError`) |
+| `OutcomeResolutionError` | Workspace outcome files could not be resolved |
+
+## Configuration
+
+task-relay stores configuration in managed blocks within agent guidance files (no config file needed). Run `trly install` to set up delegation interactively.
+
+**User scope** (`~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`): global defaults for all projects.
+
+**Project scope** (`./CLAUDE.md` or `./AGENTS.md`): per-project overrides.
+
+Example managed block:
+
+```markdown
+<!-- task-relay:start -->
+## Task Relay Delegation
+
+- primary: codex
+- mode: hybrid
+- sub-agent: deepseek
+- scope: project
+- models:
+  - codex: gpt-5.5-medium
+  - deepseek: deepseek-v4-pro[1m]
+<!-- task-relay:end -->
+```
+
+## CLI reference
+
+### `trly run`
+
+Run a raw prompt against an agent target.
+
+```
+trly run (--target {claude,codex,deepseek} | --targets TARGETS)
+         (--prompt TEXT | --prompt-file PATH | --stdin)
+         [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--cwd DIR]
+```
+
+- `--target` / `--targets` — mutually exclusive; `--targets` accepts comma-separated fallback list
+- `--prompt` / `--prompt-file` / `--stdin` — mutually exclusive input source
+- `--model` — override the default model for the agent
+- `--timeout` — subprocess timeout in seconds (default: 1800)
+
+### `trly evaluate`
+
+Run outcome-routed execution and emit JSON to stdout.
+
+```
+trly evaluate (--target {claude,codex,deepseek} | --targets TARGETS)
+              (--purpose TEXT | --purpose-file PATH | --stdin)
+              --outcome STATUS=DESCRIPTION [--output-file STATUS=PATH ...]
+              --json
+              [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--cwd DIR]
+```
+
+- `--outcome STATUS=DESCRIPTION` — repeatable; defines a possible outcome status
+- `--output-file STATUS=PATH` — repeatable; binds output file paths to outcome statuses
+- `--json` — required flag (reserved for future output formats)
+
+Output JSON schema:
+
+```json
+{
+  "status": "complete",
+  "target": "claude",
+  "duration_seconds": 12.34,
+  "stdout": "...",
+  "files": {
+    "done.txt": "..."
+  }
+}
+```
+
+### `trly health`
+
+Check agent availability.
+
+```
+trly health [--target {claude,codex,deepseek}] --json
+```
+
+Output (all agents):
+
+```json
+{
+  "claude": {"ok": true, "reason": null},
+  "codex": {"ok": false, "reason": "codex login status timed out"},
+  "deepseek": {"ok": true, "reason": null}
+}
+```
+
+### `trly install` / `trly uninstall`
+
+Manage task-relay delegation guidance via interactive wizard or non-interactive flags.
+
+```
+trly install [--primary {claude,codex}] [--scope {user,project}]
+             [--mode {main,hybrid,delegated-apply}] [--sub-agent {claude,codex,deepseek}]
+             [--model ROLE=MODEL_ID ...] [--cwd DIR]
+trly uninstall [--scope {user,project}] [--cwd DIR]
+```
+
+Run `trly install` without flags to launch the interactive wizard:
+
+1. **Primary agent** — `claude` or `codex` (determines guidance file and skill path)
+2. **Scope** — `user` (`~/.claude/` / `~/.codex/`) or `project` (`./`)
+3. **Mode** — `main` (clear + exit), `hybrid`, or `delegated-apply`
+4. **Sub-agent** — `claude`, `codex`, or `deepseek` for delegated work
+5. **Model** — select from up-to-date model catalog for each agent
+
+All flags are optional. Provide all required flags to skip the wizard.
+
+Delegation modes:
+- **main** — no automatic delegation; clears any existing managed block
+- **hybrid** — orchestration of bounded delegated work (recommended)
+- **delegated-apply** — primary model delegates full apply to sub-agent and verifies
+
+## How outcome routing works
+
+1. task-relay creates a temp workspace at `<cwd>/.task_relay/<job_id>/`
+2. The prompt is built with instructions telling the agent which files to write for each outcome
+3. The agent runs in the workspace directory
+4. After completion, task-relay scans for `status_*` files in the workspace
+5. The matching `Outcome` is resolved and its `callback` is invoked with a `JobResult`
+6. The workspace is cleaned up (unless `TASK_RELAY_KEEP_IO=1`)
+
+Agents communicate results by writing files — no parsing of stdout needed.
+
+## Package structure
+
+```
+task_relay/
+├── __init__.py          # Public API exports
+├── types.py             # Data types (Outcome, JobResult, TargetStatus, etc.)
+├── errors.py            # Exception hierarchy
+├── models.py            # Hardcoded model catalog
+├── core.py              # run(), evaluate(), evaluate_result()
+├── delegation.py        # Path resolution, managed blocks, skill bundles
+├── wizard.py            # Interactive install wizard
+├── workspace.py         # Temp workspace create/cleanup
+├── prompt.py            # Prompt builder with outcome instructions
+├── resolver.py          # Outcome resolution from workspace files
+├── agents/
+│   ├── __init__.py      # Agent registry (resolve, check_target, check_all)
+│   ├── base.py          # AgentRunner protocol
+│   ├── common.py        # Shared subprocess utilities, quota retry logic
+│   ├── claude.py        # ClaudeRunner (claude CLI)
+│   ├── codex.py         # CodexRunner (codex CLI)
+│   └── deepseek.py      # DeepSeekRunner (Claude CLI → DeepSeek API bridge)
+└── cli/
+    ├── __init__.py      # Argument parser, main()
+    ├── __main__.py      # python -m task_relay.cli entry point
+    ├── run.py           # handle_run()
+    ├── evaluate.py      # handle_evaluate(), JSON serialization
+    └── health.py        # handle_health()
+```
+
+### Agent resolution
+
+`task_relay.agents.resolve(name)` maps agent names to runners:
+
+| Name | Runner | CLI | Auth check |
+|---|---|---|---|
+| `claude` | `ClaudeRunner` | `claude` | `claude auth status --json` |
+| `codex` | `CodexRunner` | `codex` | `codex login status` |
+| `deepseek` | `DeepSeekRunner` | `claude` (bridged) | Always ok (relies on `DEEPSEEK_AUTH_TOKEN` env var) |
+
+### Quota retry
+
+When a subprocess stderr matches known quota/rate-limit patterns (e.g. "exceeded your current quota", "429", "rate limit exceeded"), the runner retries up to `LLM_QUOTA_MAX_RETRIES` times (default 288) with `LLM_QUOTA_RETRY_INTERVAL` seconds between attempts (default 300). Configure via environment variables.
+
+## Non-goals (v0.2)
 
 - No async queue or job store
 - No HTTP API or webhook runtime

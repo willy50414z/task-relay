@@ -20,7 +20,6 @@ def run(
     effort: str | None = None,
     timeout: float = 1800,
     cwd: str | None = None,
-    config_path: str | None = None,
 ) -> str:
     if target is not None and targets is not None:
         raise ValueError("Provide either 'target' or 'targets', not both.")
@@ -32,7 +31,6 @@ def run(
     return _run_with_fallback(
         selected,
         AgentRunRequest(prompt=prompt, cwd=cwd, model=model, effort=effort, timeout=timeout),
-        config_path=config_path,
     )[0]
 
 
@@ -47,7 +45,6 @@ def evaluate(
     effort: str | None = None,
     timeout: float = 1800,
     cwd: str | None = None,
-    config_path: str | None = None,
 ) -> None:
     if target is not None and targets is not None:
         raise ValueError("Provide either 'target' or 'targets', not both.")
@@ -71,7 +68,6 @@ def evaluate(
                 effort=effort,
                 timeout=timeout,
             ),
-            config_path=config_path,
         )
         matched, result = resolve(
             workspace=workspace,
@@ -103,7 +99,6 @@ def evaluate_result(
     effort: str | None = None,
     timeout: float = 1800,
     cwd: str | None = None,
-    config_path: str | None = None,
 ) -> JobResult:
     if not targets:
         raise ValueError("evaluate requires at least one target")
@@ -114,7 +109,6 @@ def evaluate_result(
         stdout, winning_target = _run_with_fallback(
             targets,
             AgentRunRequest(prompt=prompt, cwd=str(workspace), model=model, effort=effort, timeout=timeout),
-            config_path=config_path,
         )
         _, result = resolve(
             workspace=workspace,
@@ -132,13 +126,11 @@ def evaluate_result(
 def _run_with_fallback(
     targets: list[str],
     request: AgentRunRequest,
-    *,
-    config_path: str | None = None,
 ) -> tuple[str, str]:
     last_exc: AgentExecutionError | None = None
     for name in targets:
         try:
-            result = agents.resolve(name, config_path=config_path).run(request)
+            result = agents.resolve(name).run(request)
             return result.stdout, result.target
         except AgentExecutionError as exc:
             logger.warning("fallback: %s failed, trying next. error: %s", name, exc)

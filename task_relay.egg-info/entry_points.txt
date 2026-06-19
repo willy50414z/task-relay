@@ -1,3 +1,2 @@
 [console_scripts]
-agent-dispatch = task_relay.cli:compat_main
 trly = task_relay.cli:main
