@@ -1,0 +1,7 @@
+{
+  "task_id": "2.1",
+  "target": "deepseek",
+  "packet": "research/orchestration/runs/improve-install-wizard-ux-apply-20260619T000000Z/delegate_packets/2.1-scan-existing-config.md",
+  "status": "aborted",
+  "note": "Dispatch was interrupted by the user; Codex took over the bounded implementation directly."
+}

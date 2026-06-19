@@ -14,7 +14,7 @@ from task_relay.delegation import (
     resolve_install_paths,
     uninstall,
 )
-from task_relay.wizard import run_wizard
+from task_relay.wizard import make_prompt_adapter, run_wizard
 
 AGENT_NAMES = ["claude", "codex", "deepseek"]
 
@@ -136,7 +136,16 @@ def handle_install(args) -> int:
     cwd = Path(args.cwd) if args.cwd else Path.cwd()
 
     # Non-interactive: all required flags provided
-    flags_provided = args.primary is not None
+    flags_provided = any(
+        value
+        for value in (
+            args.primary,
+            args.scope,
+            args.mode,
+            args.sub_agent,
+            args.model,
+        )
+    )
     if flags_provided and args.primary and args.scope and args.mode:
         primary = args.primary
         scope = args.scope
@@ -166,6 +175,10 @@ def handle_install(args) -> int:
         print_summary(result)
         return 0
 
+    if not sys.stdin.isatty():
+        print(_non_interactive_install_error(), file=sys.stderr)
+        return 1
+
     # Partial flags: fall back to wizard
     if flags_provided:
         print("Partial flags provided — launching interactive wizard to complete configuration.")
@@ -182,19 +195,44 @@ def handle_install(args) -> int:
         )
 
     # Determine prefill path
-    prefill_path = None
-    if args.primary and args.scope:
-        guidance_path, _ = resolve_install_paths(args.primary, args.scope, cwd)
+    prefill_path = _resolve_prefill_path(args.primary, args.scope, cwd)
+
+    prompt = make_prompt_adapter()
+
+    def clear_fn(state):
+        clear(primary_agent=state.primary_agent, scope=state.scope, cwd=state.cwd)
+
+    return run_wizard(write_fn, clear_fn, cwd=cwd, prefill_path=prefill_path, prompt=prompt)
+
+
+def _non_interactive_install_error() -> str:
+    return (
+        "install requires required non-interactive flags when stdin is not a TTY: "
+        "--primary, --scope, --mode, and --sub-agent when mode is not 'main'"
+    )
+
+
+def _resolve_prefill_path(primary: str | None, scope: str | None, cwd: Path) -> str | None:
+    if primary and scope:
+        guidance_path, _ = resolve_install_paths(primary, scope, cwd)
         if guidance_path.exists():
-            prefill_path = str(guidance_path)
+            return str(guidance_path)
+        return None
 
-    def clear_fn():
-        if args.primary and args.scope:
-            clear(primary_agent=args.primary, scope=args.scope, cwd=cwd)
-        else:
-            clear(cwd=cwd)
+    candidates: list[Path] = []
+    for agent in ("claude", "codex"):
+        for candidate_scope in ("project", "user"):
+            if primary and agent != primary:
+                continue
+            if scope and candidate_scope != scope:
+                continue
+            guidance_path, _ = resolve_install_paths(agent, candidate_scope, cwd)
+            if parse_existing_block(guidance_path):
+                candidates.append(guidance_path)
 
-    return run_wizard(write_fn, clear_fn, cwd=cwd, prefill_path=prefill_path)
+    if len(candidates) == 1:
+        return str(candidates[0])
+    return None
 
 
 def handle_uninstall(args) -> int:

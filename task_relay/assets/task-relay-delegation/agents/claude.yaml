@@ -1,0 +1,3 @@
+interface:
+  display_name: "Task Relay Claude Delegation"
+  short_description: "Prepare bounded Claude delegation packets for task-relay managed OpenSpec work"

@@ -4,6 +4,7 @@ Version: 0.2.0
 Summary: Structured agent task runner with outcome routing via file signals
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: questionary<3,>=2
 
 # task-relay
 
@@ -104,7 +105,7 @@ trly evaluate \
 trly health --json
 trly health --target deepseek --json
 
-# Install delegation guidance (interactive wizard)
+# Install delegation guidance (arrow-key interactive wizard)
 trly install
 
 # Non-interactive install
@@ -260,11 +261,11 @@ All errors inherit from `TaskRelayError(RuntimeError)`.
 
 ## Configuration
 
-task-relay stores configuration in managed blocks within agent guidance files (no config file needed). Run `trly install` to set up delegation interactively.
+task-relay stores configuration in managed blocks within agent guidance files (no config file needed). Run `trly install` to set up delegation with an arrow-key interactive wizard.
 
-**User scope** (`~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`): global defaults for all projects.
+**User scope** (`~/.claude/CLAUDE.md` plus `~/.claude/skills/`, or `~/.codex/AGENTS.md` plus `~/.codex/skills/`): global defaults for all projects.
 
-**Project scope** (`./CLAUDE.md` or `./AGENTS.md`): per-project overrides.
+**Project scope** (`./CLAUDE.md` plus `./.claude/skills/`, or `./AGENTS.md` plus `./.codex/skills/`): per-project overrides.
 
 Example managed block:
 
@@ -358,7 +359,7 @@ trly install [--primary {claude,codex}] [--scope {user,project}]
 trly uninstall [--scope {user,project}] [--cwd DIR]
 ```
 
-Run `trly install` without flags to launch the interactive wizard:
+Run `trly install` without flags to launch the interactive wizard. Use Up/Down to move through choices and Enter to select:
 
 1. **Primary agent** — `claude` or `codex` (determines guidance file and skill path)
 2. **Scope** — `user` (`~/.claude/` / `~/.codex/`) or `project` (`./`)
@@ -366,7 +367,16 @@ Run `trly install` without flags to launch the interactive wizard:
 4. **Sub-agent** — `claude`, `codex`, or `deepseek` for delegated work
 5. **Model** — select from up-to-date model catalog for each agent
 
-All flags are optional. Provide all required flags to skip the wizard.
+All flags are optional in an interactive terminal. In non-interactive environments, provide `--primary`, `--scope`, `--mode`, and `--sub-agent` when the mode is not `main` to skip the wizard.
+
+Install paths:
+
+| Primary | Scope   | Guidance file        | Skill root        |
+|---------|---------|----------------------|-------------------|
+| claude  | user    | `~/.claude/CLAUDE.md` | `~/.claude/skills` |
+| claude  | project | `./CLAUDE.md`        | `./.claude/skills` |
+| codex   | user    | `~/.codex/AGENTS.md` | `~/.codex/skills` |
+| codex   | project | `./AGENTS.md`        | `./.codex/skills` |
 
 Delegation modes:
 - **main** — no automatic delegation; clears any existing managed block

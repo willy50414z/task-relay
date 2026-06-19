@@ -3,12 +3,10 @@
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from task_relay.models import (
     get_catalog,
-    find_model_by_index,
-    format_model_choices,
     get_default_model,
 )
 
@@ -41,44 +39,82 @@ class WizardState:
     cwd: Path = field(default_factory=Path.cwd)
 
 
-def _prompt_numbered(prompt: str, options: list[str], default_value: str | None = None) -> str:
-    """Display a numbered list of options and return the selected value."""
-    default_index = 1
-    if default_value:
-        for i, opt in enumerate(options, start=1):
-            if opt == default_value:
-                default_index = i
-                break
+@dataclass(frozen=True)
+class Choice:
+    value: str
+    title: str
+    description: str | None = None
 
-    print()
-    print(prompt)
-    print()
-    for i, opt in enumerate(options, start=1):
-        label = _OPTION_LABELS.get(opt, opt)
-        marker = " (*)" if opt == default_value else "    "
-        print(f"  {marker} [{i}] {opt} — {label}")
-    print()
 
-    if not sys.stdin.isatty():
-        raise RuntimeError("stdin is not a TTY; use non-interactive flags for scripting")
+class PromptAdapter(Protocol):
+    def select(self, message: str, choices: list[Choice], default: str | None = None) -> str:
+        ...
 
-    while True:
-        raw = input(f"Choice [1-{len(options)}, default {default_index}]: ").strip()
-        if not raw:
-            return options[default_index - 1]
+    def confirm(self, message: str, default: bool = True) -> bool:
+        ...
+
+
+class QuestionaryPromptAdapter:
+    def select(self, message: str, choices: list[Choice], default: str | None = None) -> str:
+        if not sys.stdin.isatty():
+            raise RuntimeError(_non_interactive_message())
         try:
-            idx = int(raw)
-            if 1 <= idx <= len(options):
-                return options[idx - 1]
-        except ValueError:
-            pass
-        print(f"Invalid. Enter a number 1-{len(options)}.")
+            import questionary
+            from questionary import Choice as QuestionaryChoice
+        except ImportError as exc:
+            raise RuntimeError(
+                "Interactive install requires the 'questionary' package. "
+                "Install task-relay with its dependencies or use non-interactive flags."
+            ) from exc
+
+        rendered = [
+            QuestionaryChoice(
+                title=f"{choice.value} - {choice.title}",
+                value=choice.value,
+                description=choice.description,
+            )
+            for choice in choices
+        ]
+        result = questionary.select(message, choices=rendered, default=default).ask()
+        if result is None:
+            raise KeyboardInterrupt
+        return str(result)
+
+    def confirm(self, message: str, default: bool = True) -> bool:
+        if not sys.stdin.isatty():
+            raise RuntimeError(_non_interactive_message())
+        try:
+            import questionary
+        except ImportError as exc:
+            raise RuntimeError(
+                "Interactive install requires the 'questionary' package. "
+                "Install task-relay with its dependencies or use non-interactive flags."
+            ) from exc
+        result = questionary.confirm(message, default=default).ask()
+        if result is None:
+            raise KeyboardInterrupt
+        return bool(result)
 
 
-def prompt_primary_agent(state: WizardState) -> WizardState:
+def make_prompt_adapter() -> PromptAdapter:
+    return QuestionaryPromptAdapter()
+
+
+def _non_interactive_message() -> str:
+    return (
+        "stdin is not a TTY; use required non-interactive flags: "
+        "--primary, --scope, --mode, and --sub-agent when mode is not 'main'"
+    )
+
+
+def _choices(options: list[str]) -> list[Choice]:
+    return [Choice(value=opt, title=_OPTION_LABELS.get(opt, opt)) for opt in options]
+
+
+def prompt_primary_agent(state: WizardState, prompt: PromptAdapter) -> WizardState:
     options = list(VALID_PRIMARY_AGENTS)
     default = state.primary_agent or "codex"
-    choice = _prompt_numbered("Select primary orchestration agent:", options, default_value=default)
+    choice = prompt.select("Select primary orchestration agent:", _choices(options), default=default)
     return WizardState(
         primary_agent=choice,
         scope=state.scope,
@@ -89,10 +125,10 @@ def prompt_primary_agent(state: WizardState) -> WizardState:
     )
 
 
-def prompt_scope(state: WizardState) -> WizardState:
+def prompt_scope(state: WizardState, prompt: PromptAdapter) -> WizardState:
     options = list(VALID_SCOPES)
     default = state.scope or "project"
-    choice = _prompt_numbered("Select installation scope:", options, default_value=default)
+    choice = prompt.select("Select installation scope:", _choices(options), default=default)
     return WizardState(
         primary_agent=state.primary_agent,
         scope=choice,
@@ -103,13 +139,10 @@ def prompt_scope(state: WizardState) -> WizardState:
     )
 
 
-def prompt_mode(state: WizardState) -> WizardState | None:
+def prompt_mode(state: WizardState, prompt: PromptAdapter) -> WizardState:
     options = list(VALID_MODES)
     default = state.mode or "hybrid"
-    choice = _prompt_numbered("Select delegation mode:", options, default_value=default)
-    if choice == "main":
-        state.mode = "main"
-        return None
+    choice = prompt.select("Select delegation mode:", _choices(options), default=default)
     return WizardState(
         primary_agent=state.primary_agent,
         scope=state.scope,
@@ -120,10 +153,10 @@ def prompt_mode(state: WizardState) -> WizardState | None:
     )
 
 
-def prompt_sub_agent(state: WizardState) -> WizardState:
+def prompt_sub_agent(state: WizardState, prompt: PromptAdapter) -> WizardState:
     options = list(VALID_SUB_AGENTS)
     default = state.sub_agent or "deepseek"
-    choice = _prompt_numbered("Select sub-agent for delegated work:", options, default_value=default)
+    choice = prompt.select("Select sub-agent for delegated work:", _choices(options), default=default)
     return WizardState(
         primary_agent=state.primary_agent,
         scope=state.scope,
@@ -134,41 +167,32 @@ def prompt_sub_agent(state: WizardState) -> WizardState:
     )
 
 
-def prompt_model(agent_name: str, role_key: str, role_label: str, state: WizardState) -> WizardState:
+def prompt_model(
+    agent_name: str,
+    role_key: str,
+    role_label: str,
+    state: WizardState,
+    prompt: PromptAdapter,
+) -> WizardState:
     catalog = get_catalog(agent_name)
     existing = state.models.get(role_key)
     default_id = existing or get_default_model(agent_name)
-    default_index = 1
-    for i, m in enumerate(catalog, start=1):
-        if m.id == default_id:
-            default_index = i
-            break
-
-    print()
-    print(f"Select model for {role_label} ({agent_name}):")
-    print(format_model_choices(catalog))
-    print()
-
-    if not sys.stdin.isatty():
-        raise RuntimeError("stdin is not a TTY; use non-interactive flags for scripting")
-
-    while True:
-        raw = input(f"Choice [1-{len(catalog)}, default {default_index}]: ").strip()
-        if not raw:
-            model = find_model_by_index(catalog, default_index)
-            break
-        try:
-            idx = int(raw)
-            model = find_model_by_index(catalog, idx)
-            break
-        except ValueError:
-            pass
-        except IndexError:
-            pass
-        print(f"Invalid. Enter a number 1-{len(catalog)}.")
+    choices = [
+        Choice(
+            value=model.id,
+            title=f"{model.name} ({model.tier})",
+            description=model.provider,
+        )
+        for model in catalog
+    ]
+    choice = prompt.select(
+        f"Select model for {role_label} ({agent_name}):",
+        choices,
+        default=default_id,
+    )
 
     new_models = dict(state.models)
-    new_models[role_key] = model.id
+    new_models[role_key] = choice
     return WizardState(
         primary_agent=state.primary_agent,
         scope=state.scope,
@@ -179,7 +203,11 @@ def prompt_model(agent_name: str, role_key: str, role_label: str, state: WizardS
     )
 
 
-def confirm_and_write(state: WizardState, write_fn: Callable[[WizardState], None]) -> bool:
+def confirm_and_write(
+    state: WizardState,
+    write_fn: Callable[[WizardState], None],
+    prompt: PromptAdapter,
+) -> bool:
     print()
     print("-- Configuration Summary --")
     print(f"  Primary agent : {state.primary_agent}")
@@ -193,12 +221,7 @@ def confirm_and_write(state: WizardState, write_fn: Callable[[WizardState], None
         print(f"    sub ({state.sub_agent}): {state.models['sub']}")
     print()
 
-    if not sys.stdin.isatty():
-        write_fn(state)
-        return True
-
-    response = input("Write configuration? [Y/n]: ").strip().lower()
-    if response in ("y", "yes", ""):
+    if prompt.confirm("Write configuration?", default=True):
         write_fn(state)
         print("Configuration written.")
         return True
@@ -208,34 +231,35 @@ def confirm_and_write(state: WizardState, write_fn: Callable[[WizardState], None
 
 def run_wizard(
     write_fn: Callable[[WizardState], None],
-    clear_fn: Callable[[], None],
+    clear_fn: Callable[[WizardState], None],
     cwd: Path | None = None,
     prefill_path: str | None = None,
+    prompt: PromptAdapter | None = None,
 ) -> int:
     state = WizardState(cwd=Path(cwd) if cwd else Path.cwd())
+    prompt = prompt or make_prompt_adapter()
 
     if prefill_path:
         state = prefill_from_existing(Path(prefill_path), state)
 
     try:
-        state = prompt_primary_agent(state)
-        state = prompt_scope(state)
+        state = prompt_primary_agent(state, prompt)
+        state = prompt_scope(state, prompt)
 
-        result = prompt_mode(state)
-        if result is None:
-            clear_fn()
+        state = prompt_mode(state, prompt)
+        if state.mode == "main":
+            clear_fn(state)
             print("Delegation cleared (mode: main).")
             return 0
-        state = result
 
-        state = prompt_sub_agent(state)
+        state = prompt_sub_agent(state, prompt)
 
         # Primary agent model
-        state = prompt_model(state.primary_agent, "primary", "primary", state)
+        state = prompt_model(state.primary_agent, "primary", "primary", state, prompt)
         # Sub-agent model
-        state = prompt_model(state.sub_agent, "sub", "sub-agent", state)
+        state = prompt_model(state.sub_agent, "sub", "sub-agent", state, prompt)
 
-        if confirm_and_write(state, write_fn):
+        if confirm_and_write(state, write_fn, prompt):
             return 0
         return 1
 
@@ -261,10 +285,28 @@ def prefill_from_existing(path: Path, state: WizardState | None = None) -> Wizar
     if parsed.get("sub_agent"):
         state.sub_agent = parsed["sub_agent"]
     if parsed.get("models"):
-        state.models = parsed["models"]
+        state.models = _normalize_model_roles(parsed)
     if parsed.get("scope"):
         state.scope = parsed["scope"]
     return state
+
+
+def _normalize_model_roles(parsed: dict) -> dict[str, str]:
+    models = parsed.get("models") or {}
+    normalized: dict[str, str] = {}
+    if models.get("primary"):
+        normalized["primary"] = models["primary"]
+    if models.get("sub"):
+        normalized["sub"] = models["sub"]
+
+    primary = parsed.get("primary")
+    sub_agent = parsed.get("sub_agent")
+    if primary and not normalized.get("primary"):
+        normalized["primary"] = models.get(primary) or models.get(f"{primary} (primary)")
+    if sub_agent and not normalized.get("sub"):
+        normalized["sub"] = models.get(sub_agent) or models.get(f"{sub_agent} (sub)")
+
+    return {key: value for key, value in normalized.items() if value}
 
 
 def _parse_managed_block(text: str) -> dict:

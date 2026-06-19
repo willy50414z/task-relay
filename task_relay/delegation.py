@@ -13,6 +13,7 @@ LEGACY_BLOCK_START = "<!-- task-relay:openspec-delegation:start -->"
 LEGACY_BLOCK_END = "<!-- task-relay:openspec-delegation:end -->"
 
 SKILL_NAME = "task-relay-delegation"
+LEGACY_SKILL_NAME = "openspec-deepseek-delegation"
 
 # Primary agent → guidance file name
 _GUIDANCE_FILE: dict[str, str] = {
@@ -60,24 +61,19 @@ def resolve_install_paths(
     return guidance_path, skill_root
 
 
-def detect_managed_blocks() -> dict[str, list[Path]]:
+def detect_managed_blocks(cwd: str | Path | None = None) -> dict[str, list[Path]]:
     """Scan user and project paths for files containing a task-relay managed block.
 
     Returns dict mapping scope ("user" | "project") to list of matching paths.
     """
     found: dict[str, list[Path]] = {"user": [], "project": []}
 
-    # User scope: ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md
-    for agent, guidance_file in _GUIDANCE_FILE.items():
-        path = Path.home() / f".{agent}" / guidance_file
-        if _has_managed_block(path):
-            found["user"].append(path)
-
-    # Project scope: ./CLAUDE.md, ./AGENTS.md
-    for guidance_file in set(_GUIDANCE_FILE.values()):
-        path = Path.cwd() / guidance_file
-        if _has_managed_block(path):
-            found["project"].append(path)
+    project_root = Path(cwd).resolve() if cwd else Path.cwd()
+    for agent in _GUIDANCE_FILE:
+        for scope in ("user", "project"):
+            path, _ = resolve_install_paths(agent, scope, project_root)
+            if _has_managed_block(path):
+                found[scope].append(path)
 
     return found
 
@@ -290,11 +286,18 @@ def install_skill_bundle(
     templates_dir = bundle_root / "templates"
     templates_dir.mkdir(exist_ok=True)
     _copy_templates(templates_dir)
+    _remove_named_skill_bundle(skill_root, LEGACY_SKILL_NAME)
 
 
 def remove_skill_bundle(skill_root: Path) -> bool:
-    """Remove the task-relay-delegation skill directory. Returns True if removed."""
-    bundle_root = skill_root / SKILL_NAME
+    """Remove task-relay managed skill directories. Returns True if any were removed."""
+    removed = _remove_named_skill_bundle(skill_root, SKILL_NAME)
+    removed = _remove_named_skill_bundle(skill_root, LEGACY_SKILL_NAME) or removed
+    return removed
+
+
+def _remove_named_skill_bundle(skill_root: Path, skill_name: str) -> bool:
+    bundle_root = skill_root / skill_name
     if bundle_root.exists():
         shutil.rmtree(bundle_root)
         return True
@@ -345,6 +348,18 @@ def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
             )
             if source.is_file():
                 agents_dir.joinpath("openai.yaml").write_text(
+                    source.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                return
+        except Exception:
+            pass
+    else:
+        try:
+            source = resources.files("task_relay.assets").joinpath(
+                f"{SKILL_NAME}/agents/{sub_agent}.yaml"
+            )
+            if source.is_file():
+                agents_dir.joinpath(f"{sub_agent}.yaml").write_text(
                     source.read_text(encoding="utf-8"), encoding="utf-8"
                 )
                 return
@@ -458,10 +473,9 @@ def clear(
 
     # No explicit primary/scope: try all known locations
     result = None
-    for agent, file_name in _GUIDANCE_FILE.items():
-        for s, base in [("user", Path.home() / f".{agent}"), ("project", project_root)]:
-            path = base / file_name
-            skill_root = base / _SKILL_DIR.get(agent, ".codex/skills")
+    for agent in _GUIDANCE_FILE:
+        for s in ("user", "project"):
+            path, skill_root = resolve_install_paths(agent, s, project_root)
             if not path.exists():
                 continue
             try:
@@ -495,13 +509,15 @@ def uninstall(
     results: list[InstallResult] = []
 
     for agent, file_name in _GUIDANCE_FILE.items():
-        candidates: list[tuple[str, Path]] = []
+        candidates: list[tuple[str, Path, Path]] = []
         if scope is None or scope == "user":
-            candidates.append(("user", Path.home() / f".{agent}" / file_name))
+            user_path, user_skill_root = resolve_install_paths(agent, "user", project_root)
+            candidates.append(("user", user_path, user_skill_root))
         if scope is None or scope == "project":
-            candidates.append(("project", project_root / file_name))
+            project_path, project_skill_root = resolve_install_paths(agent, "project", project_root)
+            candidates.append(("project", project_path, project_skill_root))
 
-        for s, path in candidates:
+        for s, path, skill_root in candidates:
             if not path.exists():
                 continue
             try:
@@ -513,8 +529,6 @@ def uninstall(
                     path.write_text(f"{cleared}\n", encoding="utf-8")
                 else:
                     path.unlink()
-                skill_root = path.parent.parent if s == "user" else project_root
-                skill_root = skill_root / _SKILL_DIR.get(agent, ".codex/skills")
                 remove_skill_bundle(skill_root)
                 results.append(
                     InstallResult(

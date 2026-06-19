@@ -1,0 +1,3 @@
+interface:
+  display_name: "Task Relay Codex Delegation"
+  short_description: "Prepare bounded Codex delegation packets for task-relay managed OpenSpec work"
