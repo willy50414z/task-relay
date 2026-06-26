@@ -5,8 +5,6 @@ from importlib import resources
 from pathlib import Path
 import shutil
 
-# ── Marker constants ──────────────────────────────────────────────
-
 MANAGED_BLOCK_START = "<!-- task-relay:start -->"
 MANAGED_BLOCK_END = "<!-- task-relay:end -->"
 LEGACY_BLOCK_START = "<!-- task-relay:openspec-delegation:start -->"
@@ -15,20 +13,16 @@ LEGACY_BLOCK_END = "<!-- task-relay:openspec-delegation:end -->"
 SKILL_NAME = "task-relay-delegation"
 LEGACY_SKILL_NAME = "openspec-deepseek-delegation"
 
-# Primary agent → guidance file name
 _GUIDANCE_FILE: dict[str, str] = {
     "claude": "CLAUDE.md",
     "codex": "AGENTS.md",
 }
 
-# Primary agent → skill dir relative to scope root
 _SKILL_DIR: dict[str, str] = {
     "claude": ".claude/skills",
     "codex": ".codex/skills",
 }
 
-
-# ── Public types ───────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class InstallResult:
@@ -37,14 +31,10 @@ class InstallResult:
     scope: str
     mode: str | None
     sub_agent: str | None
-    action: str  # "created", "updated", "cleared", "removed", "not-installed"
+    action: str
 
 
-# ── Path resolution (Group 3) ─────────────────────────────────────
-
-def resolve_install_paths(
-    primary_agent: str, scope: str, cwd: str | Path | None = None
-) -> tuple[Path, Path]:
+def resolve_install_paths(primary_agent: str, scope: str, cwd: str | Path | None = None) -> tuple[Path, Path]:
     """Return (guidance_path, skill_root) for the given primary agent and scope."""
     project_root = Path(cwd).resolve() if cwd else Path.cwd()
     guidance_file = _GUIDANCE_FILE.get(primary_agent, "AGENTS.md")
@@ -62,10 +52,7 @@ def resolve_install_paths(
 
 
 def detect_managed_blocks(cwd: str | Path | None = None) -> dict[str, list[Path]]:
-    """Scan user and project paths for files containing a task-relay managed block.
-
-    Returns dict mapping scope ("user" | "project") to list of matching paths.
-    """
+    """Scan user and project paths for files containing a task-relay managed block."""
     found: dict[str, list[Path]] = {"user": [], "project": []}
 
     project_root = Path(cwd).resolve() if cwd else Path.cwd()
@@ -90,8 +77,6 @@ def _has_managed_block(path: Path) -> bool:
         return False
 
 
-# ── Managed block generation (Group 4) ─────────────────────────────
-
 def build_guidance_block(
     primary_agent: str,
     mode: str,
@@ -100,7 +85,6 @@ def build_guidance_block(
     scope: str,
 ) -> str:
     """Generate a dynamic managed guidance block from wizard state."""
-    primary_model = models.get("primary", "")
     sub_model = models.get("sub", "")
 
     lines = [
@@ -111,16 +95,10 @@ def build_guidance_block(
         f"- mode: {mode}",
         f"- sub-agent: {sub_agent}",
         f"- scope: {scope}",
-        f"- models:",
     ]
-    if primary_model:
-        lines.append(f"  - {primary_agent}: {primary_model}")
-    if sub_agent != primary_agent and sub_model:
+    if sub_model:
+        lines.append("- models:")
         lines.append(f"  - {sub_agent}: {sub_model}")
-    elif sub_agent == primary_agent and sub_model:
-        # Same agent for both roles, list both models
-        lines.append(f"  - {primary_agent} (primary): {primary_model}")
-        lines.append(f"  - {sub_agent} (sub): {sub_model}")
 
     lines.append("")
     lines.append(_mode_header(mode, primary_agent, sub_agent))
@@ -183,10 +161,7 @@ def _mode_policy(mode: str, primary_agent: str, sub_agent: str) -> list[str]:
 
 
 def _replace_managed_block(text: str, replacement: str) -> str:
-    """Replace the managed block in *text* with *replacement*.
-
-    Handles both current and legacy markers.
-    """
+    """Replace the managed block in *text* with *replacement*."""
     for start_marker, end_marker in [
         (MANAGED_BLOCK_START, MANAGED_BLOCK_END),
         (LEGACY_BLOCK_START, LEGACY_BLOCK_END),
@@ -206,10 +181,7 @@ def _replace_managed_block(text: str, replacement: str) -> str:
 
 
 def parse_existing_block(path: Path) -> dict | None:
-    """Extract configuration from an existing managed block.
-
-    Returns None if no block is found or parsing fails.
-    """
+    """Extract configuration from an existing managed block."""
     if not path.exists():
         return None
     try:
@@ -231,6 +203,18 @@ def parse_existing_block(path: Path) -> dict | None:
         in_models = False
         for line in block.strip().splitlines():
             stripped = line.strip()
+            if stripped == "- models:" or stripped == "models:":
+                in_models = True
+                continue
+            if in_models:
+                if stripped.startswith("- ") and ":" in stripped[2:]:
+                    key, _, value = stripped[2:].partition(":")
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        result.setdefault("models", {})[key] = value
+                    continue
+                in_models = False
             kv = stripped.removeprefix("- ").strip()
             if ":" not in kv:
                 continue
@@ -245,17 +229,10 @@ def parse_existing_block(path: Path) -> dict | None:
                 result["sub_agent"] = value
             elif key == "scope":
                 result["scope"] = value
-            elif key == "models":
-                in_models = True
-                continue
-            elif in_models and key and value:
-                result.setdefault("models", {})[key] = value
         return result if result else None
 
     return None
 
-
-# ── Skill bundle management (Group 5) ──────────────────────────────
 
 def install_skill_bundle(
     skill_root: Path,
@@ -263,26 +240,20 @@ def install_skill_bundle(
     sub_agent: str,
     models: dict[str, str],
 ) -> None:
-    """Write the task-relay-delegation skill bundle to *skill_root*.
-
-    Creates/replaces <skill_root>/task-relay-delegation/.
-    """
+    """Write the task-relay-delegation skill bundle to *skill_root*."""
     bundle_root = skill_root / SKILL_NAME
     if bundle_root.exists():
         shutil.rmtree(bundle_root)
     bundle_root.mkdir(parents=True, exist_ok=True)
 
-    # SKILL.md (dynamic)
     bundle_root.joinpath("SKILL.md").write_text(
         _build_skill_md(primary_agent, sub_agent, models), encoding="utf-8"
     )
 
-    # Agent config
     agents_dir = bundle_root / "agents"
     agents_dir.mkdir(exist_ok=True)
     _write_agent_config(agents_dir, sub_agent)
 
-    # Templates (from package assets)
     templates_dir = bundle_root / "templates"
     templates_dir.mkdir(exist_ok=True)
     _copy_templates(templates_dir)
@@ -305,7 +276,6 @@ def _remove_named_skill_bundle(skill_root: Path, skill_name: str) -> bool:
 
 
 def _build_skill_md(primary_agent: str, sub_agent: str, models: dict[str, str]) -> str:
-    primary_model = models.get("primary", "default")
     sub_model = models.get("sub", "default")
 
     return "\n".join(
@@ -322,7 +292,7 @@ def _build_skill_md(primary_agent: str, sub_agent: str, models: dict[str, str]) 
             "",
             "### Agent Configuration",
             "",
-            f"- Primary: {primary_agent} (model: {primary_model})",
+            f"- Primary: {primary_agent}",
             f"- Sub-agent: {sub_agent} (model: {sub_model})",
             "",
             "### Output Modes",
@@ -341,7 +311,6 @@ def _build_skill_md(primary_agent: str, sub_agent: str, models: dict[str, str]) 
 
 def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
     if sub_agent == "codex":
-        # Copy openai.yaml from assets
         try:
             source = resources.files("task_relay.assets").joinpath(
                 f"{SKILL_NAME}/agents/openai.yaml"
@@ -366,7 +335,6 @@ def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
         except Exception:
             pass
 
-    # Fallback: write minimal config
     config_name = {"codex": "openai.yaml", "claude": "claude.yaml", "deepseek": "deepseek.yaml"}.get(
         sub_agent, f"{sub_agent}.yaml"
     )
@@ -383,7 +351,6 @@ def _copy_templates(templates_dir: Path) -> None:
         "diagnosis.md": "# Diagnosis\n\n",
     }
 
-    # Try to copy from assets first
     try:
         asset_root = resources.files("task_relay.assets").joinpath(f"{SKILL_NAME}/templates")
         for name in templates:
@@ -401,8 +368,6 @@ def _copy_templates(templates_dir: Path) -> None:
     for name, content in templates.items():
         templates_dir.joinpath(name).write_text(content, encoding="utf-8")
 
-
-# ── High-level install / uninstall ─────────────────────────────────
 
 def install(
     primary_agent: str,
@@ -471,7 +436,6 @@ def clear(
             action="cleared",
         )
 
-    # No explicit primary/scope: try all known locations
     result = None
     for agent in _GUIDANCE_FILE:
         for s in ("user", "project"):
@@ -508,7 +472,7 @@ def uninstall(
     project_root = Path(cwd).resolve() if cwd else Path.cwd()
     results: list[InstallResult] = []
 
-    for agent, file_name in _GUIDANCE_FILE.items():
+    for agent in _GUIDANCE_FILE:
         candidates: list[tuple[str, Path, Path]] = []
         if scope is None or scope == "user":
             user_path, user_skill_root = resolve_install_paths(agent, "user", project_root)

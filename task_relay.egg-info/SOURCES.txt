@@ -23,7 +23,6 @@ task_relay/agents/codex.py
 task_relay/agents/common.py
 task_relay/agents/deepseek.py
 task_relay/assets/__init__.py
-task_relay/assets/__pycache__/__init__.cpython-314.pyc
 task_relay/assets/task-relay-delegation/agents/claude.yaml
 task_relay/assets/task-relay-delegation/agents/deepseek.yaml
 task_relay/assets/task-relay-delegation/agents/openai.yaml
@@ -36,14 +35,3 @@ task_relay/cli/__main__.py
 task_relay/cli/evaluate.py
 task_relay/cli/health.py
 task_relay/cli/run.py
-tests/test_cli.py
-tests/test_core.py
-tests/test_delegation.py
-tests/test_model_matrix.py
-tests/test_models.py
-tests/test_prompt.py
-tests/test_registry.py
-tests/test_resolver.py
-tests/test_types.py
-tests/test_wizard.py
-tests/test_workspace.py

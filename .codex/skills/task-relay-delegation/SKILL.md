@@ -10,7 +10,7 @@ orchestration agent and **deepseek** for delegated draft work.
 
 ### Agent Configuration
 
-- Primary: codex (model: gpt-5.5-medium)
+- Primary: codex
 - Sub-agent: deepseek (model: deepseek-v4-pro[1m])
 
 ### Output Modes

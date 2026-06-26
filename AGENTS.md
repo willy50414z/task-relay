@@ -8,7 +8,6 @@
 - sub-agent: deepseek
 - scope: project
 - models:
-  - codex: gpt-5.5-medium
   - deepseek: deepseek-v4-pro[1m]
 
 Delegation mode: hybrid — codex orchestrates, deepseek handles bounded delegated work.

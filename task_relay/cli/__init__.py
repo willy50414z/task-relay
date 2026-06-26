@@ -6,17 +6,11 @@ from typing import Sequence
 from task_relay.cli.evaluate import handle_evaluate
 from task_relay.cli.health import handle_health
 from task_relay.cli.run import handle_run
-from task_relay.delegation import (
-    InstallResult,
-    clear,
-    install,
-    parse_existing_block,
-    resolve_install_paths,
-    uninstall,
-)
-from task_relay.wizard import make_prompt_adapter, run_wizard
+from task_relay.delegation import InstallResult, clear, install, parse_existing_block, resolve_install_paths, uninstall
+from task_relay.wizard import WizardState, make_prompt_adapter, run_wizard
 
 AGENT_NAMES = ["claude", "codex", "deepseek"]
+INSTALL_TARGETS = ["claude", "codex"]
 
 
 def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
@@ -44,11 +38,13 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     health_parser.set_defaults(handler=handle_health)
 
     install_parser = subparsers.add_parser("install", help="Install task-relay delegation guidance interactively.")
-    install_parser.add_argument("--primary", choices=["claude", "codex"], help="Primary orchestration agent")
+    install_group = install_parser.add_mutually_exclusive_group()
+    install_group.add_argument("--primary", choices=INSTALL_TARGETS, help="Single installation target for backward compatibility")
+    install_group.add_argument("--targets", type=parse_install_targets, help="Comma-separated installation targets (claude,codex)")
     install_parser.add_argument("--scope", choices=["user", "project"], help="Installation scope")
     install_parser.add_argument("--mode", choices=["main", "hybrid", "delegated-apply"], help="Delegation mode")
     install_parser.add_argument("--sub-agent", choices=["claude", "codex", "deepseek"], help="Delegation sub-agent")
-    install_parser.add_argument("--model", action="append", default=[], metavar="ROLE=MODEL_ID", help="Model for a role (e.g. --model primary=claude-sonnet-4-6 --model sub=deepseek-v4-pro[1m])")
+    install_parser.add_argument("--model", action="append", default=[], metavar="ROLE=MODEL_ID", help="Model for a role (supported role: sub)")
     install_parser.add_argument("--cwd", help="Working directory (project scope only)")
     install_parser.set_defaults(handler=handle_install)
 
@@ -113,6 +109,20 @@ def parse_targets(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def parse_install_targets(value: str) -> list[str]:
+    targets = [item.strip() for item in value.split(",") if item.strip()]
+    invalid = [item for item in targets if item not in INSTALL_TARGETS]
+    if invalid:
+        raise ValueError(f"Unknown install target(s): {', '.join(invalid)}")
+    deduped: list[str] = []
+    for item in targets:
+        if item not in deduped:
+            deduped.append(item)
+    if not deduped:
+        raise ValueError("At least one install target is required.")
+    return deduped
+
+
 def _parse_models(raw: list[str]) -> dict[str, str]:
     """Parse --model ROLE=MODEL_ID entries into {role: model_id} dict."""
     models: dict[str, str] = {}
@@ -124,114 +134,189 @@ def _parse_models(raw: list[str]) -> dict[str, str]:
         model = model.strip()
         if not role or not model:
             raise ValueError(f"--model must use ROLE=MODEL_ID syntax, got: {entry}")
-        if role not in ("primary", "sub"):
-            raise ValueError(f"--model role must be 'primary' or 'sub', got: {role}")
+        if role != "sub":
+            raise ValueError(f"--model role must be 'sub', got: {role}")
         models[role] = model
     return models
+
+
+def _resolve_install_targets(args) -> list[str]:
+    if args.targets:
+        return list(args.targets)
+    if args.primary:
+        return [args.primary]
+    return []
+
+
+def _print_install_results(results: list[InstallResult]) -> None:
+    for result in results:
+        print(f"Task-relay delegation guidance {result.action}: {result.guidance_path}")
+        print(f"  Primary agent : {result.primary_agent}")
+        print(f"  Scope         : {result.scope}")
+        print(f"  Mode          : {result.mode}")
+        print(f"  Sub-agent     : {result.sub_agent}")
 
 
 # ── Handlers ────────────────────────────────────────────────────────
 
 def handle_install(args) -> int:
     cwd = Path(args.cwd) if args.cwd else Path.cwd()
+    target_agents = _resolve_install_targets(args)
 
-    # Non-interactive: all required flags provided
     flags_provided = any(
         value
         for value in (
-            args.primary,
+            target_agents,
             args.scope,
             args.mode,
             args.sub_agent,
             args.model,
         )
     )
-    if flags_provided and args.primary and args.scope and args.mode:
-        primary = args.primary
-        scope = args.scope
-
+    if flags_provided and target_agents and args.scope and args.mode:
         if args.mode == "main":
-            result = clear(primary_agent=primary, scope=scope, cwd=cwd)
-            if result:
-                print(f"Delegation guidance cleared: {result.guidance_path}")
+            results = []
+            for target in target_agents:
+                result = clear(primary_agent=target, scope=args.scope, cwd=cwd)
+                if result:
+                    results.append(result)
+            if results:
+                for result in results:
+                    print(f"Delegation guidance cleared: {result.guidance_path}")
             else:
                 print("No managed block found to clear.")
             return 0
 
-        # hybrid or delegated-apply: need sub-agent
         if not args.sub_agent:
             print("--sub-agent is required when mode is not 'main'", file=sys.stderr)
             return 1
 
         models = _parse_models(args.model)
-        result = install(
-            primary_agent=primary,
-            scope=scope,
-            mode=args.mode,
-            sub_agent=args.sub_agent,
-            models=models,
-            cwd=cwd,
-        )
-        print_summary(result)
+        results = [
+            install(
+                primary_agent=target,
+                scope=args.scope,
+                mode=args.mode,
+                sub_agent=args.sub_agent,
+                models=models,
+                cwd=cwd,
+            )
+            for target in target_agents
+        ]
+        _print_install_results(results)
         return 0
 
     if not sys.stdin.isatty():
         print(_non_interactive_install_error(), file=sys.stderr)
         return 1
 
-    # Partial flags: fall back to wizard
     if flags_provided:
         print("Partial flags provided — launching interactive wizard to complete configuration.")
 
-    # Interactive wizard
-    def write_fn(state):
-        install(
-            primary_agent=state.primary_agent,
-            scope=state.scope,
-            mode=state.mode,
-            sub_agent=state.sub_agent,
-            models=state.models,
-            cwd=state.cwd,
-        )
-
-    # Determine prefill path
-    prefill_path = _resolve_prefill_path(args.primary, args.scope, cwd)
-
     prompt = make_prompt_adapter()
 
-    def clear_fn(state):
-        clear(primary_agent=state.primary_agent, scope=state.scope, cwd=state.cwd)
+    def write_fn(state: WizardState):
+        for target in state.target_agents:
+            install(
+                primary_agent=target,
+                scope=state.scope,
+                mode=state.mode,
+                sub_agent=state.sub_agent,
+                models=state.models,
+                cwd=state.cwd,
+            )
 
-    return run_wizard(write_fn, clear_fn, cwd=cwd, prefill_path=prefill_path, prompt=prompt)
+    def clear_fn(state: WizardState):
+        for target in state.target_agents:
+            clear(primary_agent=target, scope=state.scope, cwd=state.cwd)
+
+    prefill_state = _resolve_prefill_state(target_agents, args.scope, cwd)
+
+    return run_wizard(write_fn, clear_fn, cwd=cwd, prefill_state=prefill_state, prompt=prompt)
 
 
 def _non_interactive_install_error() -> str:
     return (
         "install requires required non-interactive flags when stdin is not a TTY: "
-        "--primary, --scope, --mode, and --sub-agent when mode is not 'main'"
+        "--primary/--targets, --scope, --mode, and --sub-agent when mode is not 'main'"
     )
 
 
-def _resolve_prefill_path(primary: str | None, scope: str | None, cwd: Path) -> str | None:
-    if primary and scope:
-        guidance_path, _ = resolve_install_paths(primary, scope, cwd)
-        if guidance_path.exists():
-            return str(guidance_path)
-        return None
-
-    candidates: list[Path] = []
-    for agent in ("claude", "codex"):
+def _resolve_prefill_state(target_agents: list[str], scope: str | None, cwd: Path) -> WizardState | None:
+    candidates: list[dict] = []
+    for agent in INSTALL_TARGETS:
+        if target_agents and agent not in target_agents:
+            continue
         for candidate_scope in ("project", "user"):
-            if primary and agent != primary:
-                continue
             if scope and candidate_scope != scope:
                 continue
             guidance_path, _ = resolve_install_paths(agent, candidate_scope, cwd)
-            if parse_existing_block(guidance_path):
-                candidates.append(guidance_path)
+            parsed = parse_existing_block(guidance_path)
+            if parsed:
+                parsed = dict(parsed)
+                parsed["guidance_path"] = str(guidance_path)
+                candidates.append(parsed)
+
+    if not candidates:
+        return None
+
+    selected_targets = [entry.get("primary") for entry in candidates if entry.get("primary") in INSTALL_TARGETS]
+    ordered_targets = [agent for agent in INSTALL_TARGETS if agent in selected_targets]
 
     if len(candidates) == 1:
-        return str(candidates[0])
+        candidate = candidates[0]
+        return WizardState(
+            target_agents=ordered_targets,
+            scope=candidate.get("scope"),
+            mode=candidate.get("mode"),
+            sub_agent=candidate.get("sub_agent"),
+            models=_prefill_models(candidate),
+            cwd=cwd,
+        )
+
+    shared_scope = _shared_value(candidates, "scope")
+    shared_mode = _shared_value(candidates, "mode")
+    shared_sub_agent = _shared_value(candidates, "sub_agent")
+    shared_sub_model = _shared_sub_model(candidates)
+
+    if shared_scope and shared_mode and shared_sub_agent and shared_sub_model:
+        return WizardState(
+            target_agents=ordered_targets,
+            scope=shared_scope,
+            mode=shared_mode,
+            sub_agent=shared_sub_agent,
+            models={"sub": shared_sub_model},
+            cwd=cwd,
+        )
+
+    return WizardState(target_agents=ordered_targets if target_agents else [], cwd=cwd)
+
+
+def _prefill_models(parsed: dict) -> dict[str, str]:
+    models = parsed.get("models") or {}
+    sub_agent = parsed.get("sub_agent")
+    if models.get("sub"):
+        return {"sub": models["sub"]}
+    if sub_agent:
+        model = models.get(sub_agent) or models.get(f"{sub_agent} (sub)")
+        if model:
+            return {"sub": model}
+    return {}
+
+
+def _shared_value(candidates: list[dict], key: str) -> str | None:
+    values = {candidate.get(key) for candidate in candidates}
+    if len(values) == 1:
+        return values.pop()
+    return None
+
+
+def _shared_sub_model(candidates: list[dict]) -> str | None:
+    values = [_prefill_models(candidate).get("sub") for candidate in candidates]
+    if any(value is None for value in values):
+        return None
+    if len(set(values)) == 1:
+        return values[0]
     return None
 
 
@@ -246,11 +331,3 @@ def handle_uninstall(args) -> int:
     for result in results:
         print(f"Removed delegation guidance: {result.guidance_path} (scope: {result.scope})")
     return 0
-
-
-def print_summary(result: InstallResult) -> None:
-    print(f"Task-relay delegation guidance {result.action}: {result.guidance_path}")
-    print(f"  Primary agent : {result.primary_agent}")
-    print(f"  Scope         : {result.scope}")
-    print(f"  Mode          : {result.mode}")
-    print(f"  Sub-agent     : {result.sub_agent}")
