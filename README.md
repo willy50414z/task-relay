@@ -100,13 +100,12 @@ trly health --target deepseek --json
 # Install delegation guidance (arrow-key interactive wizard)
 trly install
 
-# Non-interactive install
-trly install --targets codex,claude --scope project --mode hybrid --sub-agent deepseek \
-  --model sub=deepseek-v4-pro[1m]
+# Non-interactive install with review and apply chains
+trly install --targets codex,claude --scope project --feature review,apply \
+  --review-chain claude=claude-opus-4-8 --apply-chain deepseek=deepseek-v4-pro[1m]
 
 # Uninstall delegation guidance
 trly uninstall
-trly uninstall --scope project
 ```
 
 ## Python API reference
@@ -255,9 +254,7 @@ All errors inherit from `TaskRelayError(RuntimeError)`.
 
 task-relay stores configuration in managed blocks within agent guidance files (no config file needed). Run `trly install` to set up delegation with an arrow-key interactive wizard.
 
-**User scope** (`~/.claude/CLAUDE.md` plus `~/.claude/skills/`, or `~/.codex/AGENTS.md` plus `~/.codex/skills/`): global defaults for all projects.
-
-**Project scope** (`./CLAUDE.md` plus `./.claude/skills/`, or `./AGENTS.md` plus `./.codex/skills/`): per-project overrides.
+詳細的安裝與設定說明請參閱 **[docs/install.md](docs/install.md)**。
 
 Example managed block:
 
@@ -266,11 +263,10 @@ Example managed block:
 ## Task Relay Delegation
 
 - primary: codex
-- mode: hybrid
-- sub-agent: deepseek
 - scope: project
-- models:
-  - deepseek: deepseek-v4-pro[1m]
+- features: review, apply
+- review-chain: claude=claude-opus-4-8, deepseek=deepseek-v4-pro[1m]
+- apply-chain: deepseek=deepseek-v4-pro[1m]
 <!-- task-relay:end -->
 ```
 
@@ -341,38 +337,23 @@ Output (all agents):
 
 ### `trly install` / `trly uninstall`
 
-Manage task-relay delegation guidance via interactive wizard or non-interactive flags.
+Manage task-relay delegation guidance via interactive wizard or non-interactive flags. See **[docs/install.md](docs/install.md)** for full details.
 
 ```
-trly install [--primary {claude,codex} | --targets TARGETS] [--scope {user,project}]
-             [--mode {main,hybrid,delegated-apply}] [--sub-agent {claude,codex,deepseek}]
-             [--model ROLE=MODEL_ID ...] [--cwd DIR]
+trly install [--targets TARGETS] [--scope {user,project}]
+             [--feature FEATURES] [--review-chain CHAIN] [--apply-chain CHAIN] [--cwd DIR]
 trly uninstall [--scope {user,project}] [--cwd DIR]
 ```
 
-Run `trly install` without flags to launch the interactive wizard. Use Space to toggle install targets, then Up/Down and Enter for the remaining prompts:
+**Quick reference:**
 
-1. **Installation targets** — `claude`, `codex`, or both (determines which guidance files and skill paths are written)
-2. **Scope** — `user` (`~/.claude/` / `~/.codex/`) or `project` (`./`)
-3. **Mode** — `main` (clear + exit), `hybrid`, or `delegated-apply`
-4. **Sub-agent** — `claude`, `codex`, or `deepseek` for delegated work
-5. **Sub-agent model** — select from the up-to-date catalog for the delegated sub-agent only
-
-All flags are optional in an interactive terminal. In non-interactive environments, provide `--primary` or `--targets`, `--scope`, `--mode`, and `--sub-agent` when the mode is not `main` to skip the wizard.
-
-Install paths:
-
-| Primary | Scope   | Guidance file        | Skill root        |
-|---------|---------|----------------------|-------------------|
-| claude  | user    | `~/.claude/CLAUDE.md` | `~/.claude/skills` |
-| claude  | project | `./CLAUDE.md`        | `./.claude/skills` |
-| codex   | user    | `~/.codex/AGENTS.md` | `~/.codex/skills` |
-| codex   | project | `./AGENTS.md`        | `./.codex/skills` |
-
-Delegation modes:
-- **main** — no automatic delegation; clears any existing managed block
-- **hybrid** — orchestration of bounded delegated work (recommended)
-- **delegated-apply** — primary model delegates full apply to sub-agent and verifies
+| 旗標 | 說明 |
+|------|------|
+| `--targets` | 逗號分隔的安裝目標：`claude,codex` |
+| `--scope` | `user`（全域）或 `project`（當前專案） |
+| `--feature` | 啟用功能：`review,apply`；或 `none` 清除委派 |
+| `--review-chain` | Review agent 鏈：`agent=model,agent` |
+| `--apply-chain` | Apply agent 鏈：`agent=model,agent` |
 
 ## How outcome routing works
 
