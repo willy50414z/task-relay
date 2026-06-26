@@ -23,11 +23,13 @@ task_relay/agents/codex.py
 task_relay/agents/common.py
 task_relay/agents/deepseek.py
 task_relay/assets/__init__.py
+task_relay/assets/__pycache__/__init__.cpython-314.pyc
 task_relay/assets/task-relay-delegation/agents/claude.yaml
 task_relay/assets/task-relay-delegation/agents/deepseek.yaml
 task_relay/assets/task-relay-delegation/agents/openai.yaml
 task_relay/assets/task-relay-delegation/templates/diagnosis.md
 task_relay/assets/task-relay-delegation/templates/implementation-draft.md
+task_relay/assets/task-relay-delegation/templates/review-proposal.md
 task_relay/assets/task-relay-delegation/templates/review.md
 task_relay/assets/task-relay-delegation/templates/test-draft.md
 task_relay/cli/__init__.py
@@ -35,3 +37,6 @@ task_relay/cli/__main__.py
 task_relay/cli/evaluate.py
 task_relay/cli/health.py
 task_relay/cli/run.py
+tests/test_cli_install.py
+tests/test_delegation.py
+tests/test_wizard.py

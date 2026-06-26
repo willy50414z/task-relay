@@ -79,85 +79,130 @@ def _has_managed_block(path: Path) -> bool:
 
 def build_guidance_block(
     primary_agent: str,
-    mode: str,
-    sub_agent: str,
-    models: dict[str, str],
+    features: list[str],
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
     scope: str,
 ) -> str:
     """Generate a dynamic managed guidance block from wizard state."""
-    sub_model = models.get("sub", "")
-
     lines = [
         MANAGED_BLOCK_START,
         "## Task Relay Delegation",
         "",
         f"- primary: {primary_agent}",
-        f"- mode: {mode}",
-        f"- sub-agent: {sub_agent}",
         f"- scope: {scope}",
     ]
-    if sub_model:
-        lines.append("- models:")
-        lines.append(f"  - {sub_agent}: {sub_model}")
+
+    if features:
+        lines.append(f"- features: {', '.join(features)}")
+    else:
+        lines.append("- features: none")
+
+    if review_chain:
+        lines.append(f"- review-chain: {_format_chain(review_chain)}")
+    if apply_chain:
+        lines.append(f"- apply-chain: {_format_chain(apply_chain)}")
 
     lines.append("")
-    lines.append(_mode_header(mode, primary_agent, sub_agent))
+    lines.append(_features_header(features, primary_agent, review_chain, apply_chain))
     lines.append("")
-    lines.extend(_mode_policy(mode, primary_agent, sub_agent))
+    lines.extend(_features_policy(features, primary_agent, review_chain, apply_chain))
     lines.append("")
     lines.append(MANAGED_BLOCK_END)
 
     return "\n".join(lines)
 
 
-def _mode_header(mode: str, primary_agent: str, sub_agent: str) -> str:
-    if mode == "main":
+def _format_chain(chain: list[tuple[str, str | None]]) -> str:
+    """Format chain as 'agent=model, agent' string."""
+    return ", ".join(
+        f"{agent}={model}" if model else agent
+        for agent, model in chain
+    )
+
+
+def _features_header(
+    features: list[str],
+    primary_agent: str,
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
+) -> str:
+    if not features:
         return f"Delegation mode: main — all work stays with {primary_agent}."
-    if mode == "hybrid":
-        return f"Delegation mode: hybrid — {primary_agent} orchestrates, {sub_agent} handles bounded delegated work."
-    return f"Delegation mode: delegated-apply — {primary_agent} delegates full apply to {sub_agent} and verifies completion."
+
+    parts: list[str] = []
+    if review_chain:
+        parts.append(f"review via {_format_chain(review_chain)}")
+    if apply_chain:
+        parts.append(f"apply via {_format_chain(apply_chain)}")
+
+    joined = "; ".join(parts)
+    return f"Delegation: {primary_agent} orchestrates — {joined}."
 
 
-def _mode_policy(mode: str, primary_agent: str, sub_agent: str) -> list[str]:
-    if mode == "main":
+def _features_policy(
+    features: list[str],
+    primary_agent: str,
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
+) -> list[str]:
+    if not features:
         return [
             "All work remains with the primary model. No automatic delegation.",
         ]
 
-    if mode == "hybrid":
-        return [
-            f"Primary model ({primary_agent}) owns:",
-            "- Architecture, security, data migration, destructive operations, credentials.",
-            "- OpenSpec artifact interpretation, scope, and state changes.",
-            "- Integration of delegated output and final verification.",
-            "",
-            f"Sub-agent ({sub_agent}) handles:",
-            "- Bounded implementation drafts with clear file scope.",
-            "- Small-scope tests and test suggestions.",
-            "- Documentation extraction and summaries.",
-            "- Repetitive edits.",
-            "- Failure diagnosis and first-pass review.",
-            "",
-            "Propose-time task tags for delegation:",
-            f"- `[delegate:{sub_agent}]` — route implementation to sub-agent.",
-            "- `[delegate:test]` — route test authoring.",
-            "- `[delegate:review]` — route review/diagnosis.",
-            "- `[delegate:optional]` — delegate when prompt packet is small.",
-            f"- `[{primary_agent}-only]` — keep in primary agent.",
-            "",
-            f"Use `trly run --target {sub_agent} --prompt-file <packet>` for delegated work.",
-        ]
+    policy: list[str] = []
 
-    return [
-        f"Primary model ({primary_agent}) packages the apply request and delegates",
-        f"implementation to {sub_agent}. The sub-agent produces patches or implementation",
-        "reports for the full eligible apply scope.",
-        "",
-        "The primary model must:",
-        "- Verify tasks, tests, and spec alignment before marking tasks complete.",
-        "- Take over if delegated output is incomplete, unsafe, too broad, or unverifiable.",
-        "- Not let the sub-agent mark tasks checkboxes complete.",
-    ]
+    policy.append(f"Primary model ({primary_agent}) owns:")
+    policy.append("- Architecture, security, data migration, destructive operations, credentials.")
+    policy.append("- OpenSpec artifact interpretation, scope, and state changes.")
+    policy.append("- Integration of delegated output and final verification.")
+    policy.append("")
+
+    if "review" in features and review_chain:
+        policy.append("## Review Workflow (propose phase)")
+        policy.append("")
+        primary_review = review_chain[0][0]
+        policy.append(f"When a proposal is ready for review, {primary_agent} SHALL:")
+        policy.append(f"1. Package the proposal context using the `review-proposal` template.")
+        policy.append(f"2. Delegate to review chain (primary: {primary_review}).")
+        policy.append(f"3. The review agent evaluates requirement clarity, direction correctness,")
+        policy.append(f"   and implementation plan completeness.")
+        policy.append(f"4. The review agent writes findings to `spec/delegent_review.md`.")
+        policy.append(f"5. The review agent MUST ask the user when encountering ambiguity")
+        policy.append(f"   rather than defining solutions independently.")
+        policy.append(f"6. {primary_agent} reads the review and updates proposal artifacts as needed.")
+        policy.append("")
+        policy.append("Review agent non-goals: do not modify OpenSpec state, mark tasks,")
+        policy.append("perform destructive operations, or make architecture decisions.")
+        policy.append("")
+
+    if "apply" in features and apply_chain:
+        policy.append("## Apply Workflow (implementation phase)")
+        policy.append("")
+        primary_apply = apply_chain[0][0]
+        policy.append(f"When implementation is ready, {primary_agent} SHALL:")
+        policy.append(f"1. Package the apply request using implementation-draft or test-draft templates.")
+        policy.append(f"2. Delegate to apply chain (primary: {primary_apply}).")
+        policy.append(f"3. The apply agent produces patches or implementation reports.")
+        policy.append(f"4. {primary_agent} verifies output before marking tasks complete.")
+        policy.append("")
+        policy.append("Apply agent non-goals: do not modify OpenSpec state, mark tasks checkboxes,")
+        policy.append("or make architecture/security/migration decisions.")
+        policy.append("")
+
+    policy.append("## Task Tags")
+    policy.append("")
+    if "review" in features:
+        policy.append("- `[delegate:review]` — route proposal review to review chain.")
+    if "apply" in features:
+        policy.append(f"- `[delegate:{apply_chain[0][0] if apply_chain else 'apply'}]` — route implementation to apply chain.")
+        policy.append("- `[delegate:test]` — route test authoring.")
+    policy.append(f"- `[{primary_agent}-only]` — keep in primary agent.")
+    policy.append("")
+    policy.append(f"Use `trly run --target <agent> --prompt-file <packet>` for delegated work.")
+
+    return policy
 
 
 def _replace_managed_block(text: str, replacement: str) -> str:
@@ -221,7 +266,12 @@ def parse_existing_block(path: Path) -> dict | None:
             key, _, value = kv.partition(":")
             key = key.strip()
             value = value.strip()
-            if key == "primary":
+
+            if key == "features":
+                result["features"] = [f.strip() for f in value.split(",") if f.strip() and f.strip() != "none"]
+            elif key in ("review-chain", "apply-chain"):
+                result[key.replace("-", "_")] = _parse_chain_value(value)
+            elif key == "primary":
                 result["primary"] = value
             elif key == "mode":
                 result["mode"] = value
@@ -229,16 +279,46 @@ def parse_existing_block(path: Path) -> dict | None:
                 result["sub_agent"] = value
             elif key == "scope":
                 result["scope"] = value
+
+        # Legacy format → new format mapping
+        if not result.get("features") and result.get("mode") and result["mode"] != "main":
+            result["features"] = ["apply"]
+        if not result.get("apply_chain") and result.get("sub_agent"):
+            sub = result["sub_agent"]
+            models_dict = result.get("models") or {}
+            model = models_dict.get("sub") or models_dict.get(sub)
+            result["apply_chain"] = [(sub, model)]
+
         return result if result else None
 
     return None
 
 
+def _parse_chain_value(value: str) -> list[tuple[str, str | None]]:
+    """Parse 'agent=model, agent' into [(agent, model_or_none), ...]."""
+    chain: list[tuple[str, str | None]] = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" in entry:
+            agent, _, model = entry.partition("=")
+            agent = agent.strip()
+            model_val = model.strip() or None
+        else:
+            agent = entry.strip()
+            model_val = None
+        if agent:
+            chain.append((agent, model_val))
+    return chain
+
+
 def install_skill_bundle(
     skill_root: Path,
     primary_agent: str,
-    sub_agent: str,
-    models: dict[str, str],
+    features: list[str],
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
 ) -> None:
     """Write the task-relay-delegation skill bundle to *skill_root*."""
     bundle_root = skill_root / SKILL_NAME
@@ -247,12 +327,13 @@ def install_skill_bundle(
     bundle_root.mkdir(parents=True, exist_ok=True)
 
     bundle_root.joinpath("SKILL.md").write_text(
-        _build_skill_md(primary_agent, sub_agent, models), encoding="utf-8"
+        _build_skill_md(primary_agent, features, review_chain, apply_chain),
+        encoding="utf-8",
     )
 
     agents_dir = bundle_root / "agents"
     agents_dir.mkdir(exist_ok=True)
-    _write_agent_config(agents_dir, sub_agent)
+    _write_agent_configs(agents_dir, review_chain, apply_chain)
 
     templates_dir = bundle_root / "templates"
     templates_dir.mkdir(exist_ok=True)
@@ -275,42 +356,76 @@ def _remove_named_skill_bundle(skill_root: Path, skill_name: str) -> bool:
     return False
 
 
-def _build_skill_md(primary_agent: str, sub_agent: str, models: dict[str, str]) -> str:
-    sub_model = models.get("sub", "default")
+def _build_skill_md(
+    primary_agent: str,
+    features: list[str],
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
+) -> str:
+    lines = [
+        "---",
+        f"name: {SKILL_NAME}",
+        "description: Delegation skill for task-relay managed OpenSpec workflows.",
+        "---",
+        "",
+        "## Task Relay Delegation",
+        "",
+        f"This project uses task-relay delegation with **{primary_agent}** as the primary",
+        "orchestration agent.",
+        "",
+    ]
 
-    return "\n".join(
-        [
-            "---",
-            f"name: {SKILL_NAME}",
-            "description: Delegation skill for task-relay managed OpenSpec workflows.",
-            "---",
-            "",
-            "## Task Relay Delegation",
-            "",
-            f"This project uses task-relay delegation with **{primary_agent}** as the primary",
-            f"orchestration agent and **{sub_agent}** for delegated draft work.",
-            "",
-            "### Agent Configuration",
-            "",
-            f"- Primary: {primary_agent}",
-            f"- Sub-agent: {sub_agent} (model: {sub_model})",
-            "",
-            "### Output Modes",
-            "",
-            "When receiving a delegation prompt packet, produce ONE of:",
-            "",
-            "- **implementation-draft**: A patch or file-by-file edit plan.",
-            "- **test-draft**: Tests to add and the command to run them.",
-            "- **review**: Findings against a diff or spec, with severity.",
-            "- **diagnosis**: Likely root cause and next fix for a failing command.",
-            "",
-            "Return only the requested output. Do not modify OpenSpec state or mark tasks complete.",
-        ]
-    )
+    if review_chain:
+        lines.append("### Review Chain")
+        lines.append("")
+        for i, (agent, model) in enumerate(review_chain):
+            role = "primary" if i == 0 else f"fallback {i}"
+            model_str = model or "default"
+            lines.append(f"- {role}: **{agent}** (model: {model_str})")
+        lines.append("")
+
+    if apply_chain:
+        lines.append("### Apply Chain")
+        lines.append("")
+        for i, (agent, model) in enumerate(apply_chain):
+            role = "primary" if i == 0 else f"fallback {i}"
+            model_str = model or "default"
+            lines.append(f"- {role}: **{agent}** (model: {model_str})")
+        lines.append("")
+
+    lines.append("### Output Modes")
+    lines.append("")
+    lines.append("When receiving a delegation prompt packet, produce ONE of:")
+    lines.append("")
+    if "review" in features:
+        lines.append("- **review-proposal**: Review a proposal for clarity, correctness, and completeness.")
+    if "apply" in features:
+        lines.append("- **implementation-draft**: A patch or file-by-file edit plan.")
+        lines.append("- **test-draft**: Tests to add and the command to run them.")
+        lines.append("- **review**: Findings against a diff or spec, with severity.")
+        lines.append("- **diagnosis**: Likely root cause and next fix for a failing command.")
+    lines.append("")
+    lines.append("Return only the requested output. Do not modify OpenSpec state or mark tasks complete.")
+
+    return "\n".join(lines)
 
 
-def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
-    if sub_agent == "codex":
+def _write_agent_configs(
+    agents_dir: Path,
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
+) -> None:
+    """Write agent config files for all agents in review and apply chains."""
+    seen: set[str] = set()
+    for agent, _model in review_chain + apply_chain:
+        if agent in seen:
+            continue
+        seen.add(agent)
+        _write_agent_config(agents_dir, agent)
+
+
+def _write_agent_config(agents_dir: Path, agent: str) -> None:
+    if agent == "codex":
         try:
             source = resources.files("task_relay.assets").joinpath(
                 f"{SKILL_NAME}/agents/openai.yaml"
@@ -325,10 +440,10 @@ def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
     else:
         try:
             source = resources.files("task_relay.assets").joinpath(
-                f"{SKILL_NAME}/agents/{sub_agent}.yaml"
+                f"{SKILL_NAME}/agents/{agent}.yaml"
             )
             if source.is_file():
-                agents_dir.joinpath(f"{sub_agent}.yaml").write_text(
+                agents_dir.joinpath(f"{agent}.yaml").write_text(
                     source.read_text(encoding="utf-8"), encoding="utf-8"
                 )
                 return
@@ -336,10 +451,10 @@ def _write_agent_config(agents_dir: Path, sub_agent: str) -> None:
             pass
 
     config_name = {"codex": "openai.yaml", "claude": "claude.yaml", "deepseek": "deepseek.yaml"}.get(
-        sub_agent, f"{sub_agent}.yaml"
+        agent, f"{agent}.yaml"
     )
     agents_dir.joinpath(config_name).write_text(
-        f"# Agent configuration for {sub_agent}\n", encoding="utf-8"
+        f"# Agent configuration for {agent}\n", encoding="utf-8"
     )
 
 
@@ -349,6 +464,7 @@ def _copy_templates(templates_dir: Path) -> None:
         "test-draft.md": "# Test Draft\n\n",
         "review.md": "# Review Findings\n\n",
         "diagnosis.md": "# Diagnosis\n\n",
+        "review-proposal.md": "# Review Proposal\n\n",
     }
 
     try:
@@ -372,16 +488,16 @@ def _copy_templates(templates_dir: Path) -> None:
 def install(
     primary_agent: str,
     scope: str,
-    mode: str,
-    sub_agent: str,
-    models: dict[str, str],
+    features: list[str],
+    review_chain: list[tuple[str, str | None]],
+    apply_chain: list[tuple[str, str | None]],
     cwd: str | Path | None = None,
 ) -> InstallResult:
     """Install delegation guidance for the given configuration."""
     guidance_path, skill_root = resolve_install_paths(primary_agent, scope, cwd)
 
     existing = guidance_path.read_text(encoding="utf-8") if guidance_path.exists() else ""
-    block = build_guidance_block(primary_agent, mode, sub_agent, models, scope)
+    block = build_guidance_block(primary_agent, features, review_chain, apply_chain, scope)
 
     if _has_managed_block(guidance_path):
         updated = _replace_managed_block(existing, block)
@@ -394,14 +510,14 @@ def install(
     guidance_path.parent.mkdir(parents=True, exist_ok=True)
     guidance_path.write_text(updated, encoding="utf-8")
 
-    install_skill_bundle(skill_root, primary_agent, sub_agent, models)
+    install_skill_bundle(skill_root, primary_agent, features, review_chain, apply_chain)
 
     return InstallResult(
         guidance_path=guidance_path,
         primary_agent=primary_agent,
         scope=scope,
-        mode=mode,
-        sub_agent=sub_agent,
+        mode=None if features else "main",
+        sub_agent=None,
         action=action,
     )
 

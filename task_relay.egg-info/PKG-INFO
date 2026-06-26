@@ -109,8 +109,8 @@ trly health --target deepseek --json
 trly install
 
 # Non-interactive install
-trly install --primary codex --scope project --mode hybrid --sub-agent deepseek \
-  --model primary=gpt-5.5-medium --model sub=deepseek-v4-pro[1m]
+trly install --targets codex,claude --scope project --mode hybrid --sub-agent deepseek \
+  --model sub=deepseek-v4-pro[1m]
 
 # Uninstall delegation guidance
 trly uninstall
@@ -278,7 +278,6 @@ Example managed block:
 - sub-agent: deepseek
 - scope: project
 - models:
-  - codex: gpt-5.5-medium
   - deepseek: deepseek-v4-pro[1m]
 <!-- task-relay:end -->
 ```
@@ -353,21 +352,21 @@ Output (all agents):
 Manage task-relay delegation guidance via interactive wizard or non-interactive flags.
 
 ```
-trly install [--primary {claude,codex}] [--scope {user,project}]
+trly install [--primary {claude,codex} | --targets TARGETS] [--scope {user,project}]
              [--mode {main,hybrid,delegated-apply}] [--sub-agent {claude,codex,deepseek}]
              [--model ROLE=MODEL_ID ...] [--cwd DIR]
 trly uninstall [--scope {user,project}] [--cwd DIR]
 ```
 
-Run `trly install` without flags to launch the interactive wizard. Use Up/Down to move through choices and Enter to select:
+Run `trly install` without flags to launch the interactive wizard. Use Space to toggle install targets, then Up/Down and Enter for the remaining prompts:
 
-1. **Primary agent** — `claude` or `codex` (determines guidance file and skill path)
+1. **Installation targets** — `claude`, `codex`, or both (determines which guidance files and skill paths are written)
 2. **Scope** — `user` (`~/.claude/` / `~/.codex/`) or `project` (`./`)
 3. **Mode** — `main` (clear + exit), `hybrid`, or `delegated-apply`
 4. **Sub-agent** — `claude`, `codex`, or `deepseek` for delegated work
-5. **Model** — select from up-to-date model catalog for each agent
+5. **Sub-agent model** — select from the up-to-date catalog for the delegated sub-agent only
 
-All flags are optional in an interactive terminal. In non-interactive environments, provide `--primary`, `--scope`, `--mode`, and `--sub-agent` when the mode is not `main` to skip the wizard.
+All flags are optional in an interactive terminal. In non-interactive environments, provide `--primary` or `--targets`, `--scope`, `--mode`, and `--sub-agent` when the mode is not `main` to skip the wizard.
 
 Install paths:
 

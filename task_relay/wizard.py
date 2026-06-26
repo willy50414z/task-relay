@@ -9,8 +9,7 @@ from task_relay.models import get_catalog, get_default_model
 
 VALID_TARGET_AGENTS = ("claude", "codex")
 VALID_SCOPES = ("user", "project")
-VALID_MODES = ("main", "hybrid", "delegated-apply")
-VALID_SUB_AGENTS = ("claude", "codex", "deepseek")
+VALID_AGENTS = ("claude", "codex", "deepseek")
 
 _OPTION_LABELS: dict[str, str] = {
     "claude": "Claude Code",
@@ -18,9 +17,6 @@ _OPTION_LABELS: dict[str, str] = {
     "deepseek": "DeepSeek (via Claude CLI bridge)",
     "user": "User (~/.claude/ or ~/.codex/) — global default for all projects",
     "project": "Project (./) — this project only",
-    "main": "Main — no delegation, all work stays with primary agent",
-    "hybrid": "Hybrid — primary orchestrates, sub-agent handles bounded work (recommended)",
-    "delegated-apply": "Delegated-apply — primary delegates full apply to sub-agent and verifies",
 }
 
 
@@ -28,9 +24,9 @@ _OPTION_LABELS: dict[str, str] = {
 class WizardState:
     target_agents: list[str] = field(default_factory=list)
     scope: str | None = None
-    mode: str | None = None
-    sub_agent: str | None = None
-    models: dict[str, str] = field(default_factory=dict)
+    features: list[str] = field(default_factory=list)
+    review_chain: list[tuple[str, str | None]] = field(default_factory=list)
+    apply_chain: list[tuple[str, str | None]] = field(default_factory=list)
     cwd: Path = field(default_factory=Path.cwd)
 
 
@@ -139,9 +135,9 @@ def prompt_target_agents(state: WizardState, prompt: PromptAdapter) -> WizardSta
     return WizardState(
         target_agents=selected,
         scope=state.scope,
-        mode=state.mode,
-        sub_agent=state.sub_agent,
-        models=dict(state.models),
+        features=list(state.features),
+        review_chain=list(state.review_chain),
+        apply_chain=list(state.apply_chain),
         cwd=state.cwd,
     )
 
@@ -153,46 +149,67 @@ def prompt_scope(state: WizardState, prompt: PromptAdapter) -> WizardState:
     return WizardState(
         target_agents=list(state.target_agents),
         scope=choice,
-        mode=state.mode,
-        sub_agent=state.sub_agent,
-        models=dict(state.models),
+        features=list(state.features),
+        review_chain=list(state.review_chain),
+        apply_chain=list(state.apply_chain),
         cwd=state.cwd,
     )
 
 
-def prompt_mode(state: WizardState, prompt: PromptAdapter) -> WizardState:
-    options = list(VALID_MODES)
-    default = state.mode or "hybrid"
-    choice = prompt.select("Select delegation mode:", _choices(options), default=default)
+def prompt_features(state: WizardState, prompt: PromptAdapter) -> WizardState:
+    options = ["review", "apply"]
+    labels: dict[str, str] = {
+        "review": "Review — review agent validates proposals for clarity, correctness, and completeness",
+        "apply": "Apply — apply agent implements changes (replaces legacy sub-agent)",
+    }
+    default = state.features or ["apply"]
+    choices = [Choice(value=opt, title=labels.get(opt, opt)) for opt in options]
+    selected = prompt.checkbox("Select features to enable:", choices, default=default)
+    selected = [choice for choice in options if choice in selected]
     return WizardState(
         target_agents=list(state.target_agents),
         scope=state.scope,
-        mode=choice,
-        sub_agent=state.sub_agent,
-        models=dict(state.models),
+        features=selected,
+        review_chain=list(state.review_chain),
+        apply_chain=list(state.apply_chain),
         cwd=state.cwd,
     )
 
 
-def prompt_sub_agent(state: WizardState, prompt: PromptAdapter) -> WizardState:
-    options = list(VALID_SUB_AGENTS)
-    default = state.sub_agent or "deepseek"
-    choice = prompt.select("Select sub-agent for delegated work:", _choices(options), default=default)
+def _chain_agents(chain: list[tuple[str, str | None]]) -> list[str]:
+    """Extract agent names already in the chain."""
+    return [agent for agent, _model in chain]
+
+
+def prompt_chain_primary(state: WizardState, chain_name: str, prompt: PromptAdapter) -> WizardState:
+    options = list(VALID_AGENTS)
+    label = "Review" if chain_name == "review" else "Apply"
+    choice = prompt.select(f"Select primary {label} agent:", _choices(options))
+    chain = [(choice, None)]
+    if chain_name == "review":
+        return WizardState(
+            target_agents=list(state.target_agents),
+            scope=state.scope,
+            features=list(state.features),
+            review_chain=chain,
+            apply_chain=list(state.apply_chain),
+            cwd=state.cwd,
+        )
     return WizardState(
         target_agents=list(state.target_agents),
         scope=state.scope,
-        mode=state.mode,
-        sub_agent=choice,
-        models=dict(state.models),
+        features=list(state.features),
+        review_chain=list(state.review_chain),
+        apply_chain=chain,
         cwd=state.cwd,
     )
 
 
-def prompt_sub_agent_model(state: WizardState, prompt: PromptAdapter) -> WizardState:
-    if state.sub_agent is None:
-        raise ValueError("Sub-agent must be selected before selecting a model.")
-    catalog = get_catalog(state.sub_agent)
-    default_id = state.models.get("sub") or get_default_model(state.sub_agent)
+def prompt_chain_model(
+    state: WizardState, chain_name: str, agent: str, prompt: PromptAdapter
+) -> WizardState:
+    catalog = get_catalog(agent)
+    default_id = get_default_model(agent)
     choices = [
         Choice(
             value=model.id,
@@ -201,21 +218,82 @@ def prompt_sub_agent_model(state: WizardState, prompt: PromptAdapter) -> WizardS
         )
         for model in catalog
     ]
+    label = "Review" if chain_name == "review" else "Apply"
     choice = prompt.select(
-        f"Select model for sub-agent ({state.sub_agent}):",
+        f"Select model for {label} agent ({agent}):",
         choices,
         default=default_id,
     )
-    new_models = dict(state.models)
-    new_models["sub"] = choice
+    chain = _get_chain(state, chain_name)
+    updated_chain = [(a, choice if a == agent else m) for a, m in chain]
+    return _set_chain(state, chain_name, updated_chain)
+
+
+def _get_chain(state: WizardState, chain_name: str) -> list[tuple[str, str | None]]:
+    return state.review_chain if chain_name == "review" else state.apply_chain
+
+
+def _set_chain(state: WizardState, chain_name: str, chain: list[tuple[str, str | None]]) -> WizardState:
+    if chain_name == "review":
+        return WizardState(
+            target_agents=list(state.target_agents),
+            scope=state.scope,
+            features=list(state.features),
+            review_chain=chain,
+            apply_chain=list(state.apply_chain),
+            cwd=state.cwd,
+        )
     return WizardState(
         target_agents=list(state.target_agents),
         scope=state.scope,
-        mode=state.mode,
-        sub_agent=state.sub_agent,
-        models=new_models,
+        features=list(state.features),
+        review_chain=list(state.review_chain),
+        apply_chain=chain,
         cwd=state.cwd,
     )
+
+
+def prompt_chain_fallback_loop(
+    state: WizardState, chain_name: str, prompt: PromptAdapter
+) -> WizardState:
+    """Loop: add fallback agents to a chain until user declines or agents exhausted."""
+    label = "Review" if chain_name == "review" else "Apply"
+    current = state
+
+    while True:
+        chain = _get_chain(current, chain_name)
+        used_agents = _chain_agents(chain)
+        available = [a for a in VALID_AGENTS if a not in used_agents]
+
+        if not available:
+            break
+
+        chain_display = " → ".join(
+            f"{a} ({m or 'default'})" for a, m in chain
+        )
+        print(f"\n  Current {label} chain: {chain_display}")
+
+        if not prompt.confirm(f"Add fallback agent to {label} chain?", default=False):
+            break
+
+        chosen = prompt.select(
+            f"Select {label} fallback agent:", _choices(available)
+        )
+        catalog = get_catalog(chosen)
+        default_id = get_default_model(chosen)
+        model_choices = [
+            Choice(value=model.id, title=f"{model.name} ({model.tier})", description=model.provider)
+            for model in catalog
+        ]
+        model = prompt.select(
+            f"Select model for {label} fallback ({chosen}):",
+            model_choices,
+            default=default_id,
+        )
+        chain.append((chosen, model))
+        current = _set_chain(current, chain_name, chain)
+
+    return current
 
 
 def confirm_and_write(
@@ -227,11 +305,18 @@ def confirm_and_write(
     print("-- Configuration Summary --")
     print(f"  Targets       : {', '.join(state.target_agents)}")
     print(f"  Scope         : {state.scope}")
-    print(f"  Mode          : {state.mode}")
-    print(f"  Sub-agent     : {state.sub_agent}")
-    if "sub" in state.models:
-        print("  Models        :")
-        print(f"    sub ({state.sub_agent}): {state.models['sub']}")
+    features_display = ", ".join(state.features) if state.features else "(none — no delegation)"
+    print(f"  Features      : {features_display}")
+    if "review" in state.features:
+        chain_display = " → ".join(
+            f"{a} ({m or 'default'})" for a, m in state.review_chain
+        )
+        print(f"  Review chain  : {chain_display}")
+    if "apply" in state.features:
+        chain_display = " → ".join(
+            f"{a} ({m or 'default'})" for a, m in state.apply_chain
+        )
+        print(f"  Apply chain   : {chain_display}")
     print()
 
     if prompt.confirm("Write configuration?", default=True):
@@ -255,21 +340,31 @@ def run_wizard(
     if prefill_state is not None:
         state.target_agents = list(prefill_state.target_agents)
         state.scope = prefill_state.scope
-        state.mode = prefill_state.mode
-        state.sub_agent = prefill_state.sub_agent
-        state.models = dict(prefill_state.models)
+        state.features = list(prefill_state.features)
+        state.review_chain = list(prefill_state.review_chain)
+        state.apply_chain = list(prefill_state.apply_chain)
 
     try:
         state = prompt_target_agents(state, prompt)
         state = prompt_scope(state, prompt)
-        state = prompt_mode(state, prompt)
-        if state.mode == "main":
+        state = prompt_features(state, prompt)
+
+        if not state.features:
             clear_fn(state)
-            print("Delegation cleared (mode: main).")
+            print("No features selected — delegation cleared (equivalent to mode: main).")
             return 0
 
-        state = prompt_sub_agent(state, prompt)
-        state = prompt_sub_agent_model(state, prompt)
+        if "review" in state.features:
+            state = prompt_chain_primary(state, "review", prompt)
+            review_primary = state.review_chain[0][0]
+            state = prompt_chain_model(state, "review", review_primary, prompt)
+            state = prompt_chain_fallback_loop(state, "review", prompt)
+
+        if "apply" in state.features:
+            state = prompt_chain_primary(state, "apply", prompt)
+            apply_primary = state.apply_chain[0][0]
+            state = prompt_chain_model(state, "apply", apply_primary, prompt)
+            state = prompt_chain_fallback_loop(state, "apply", prompt)
 
         if confirm_and_write(state, write_fn, prompt):
             return 0
@@ -293,28 +388,31 @@ def prefill_from_existing(path: Path, state: WizardState | None = None) -> Wizar
     target = parsed.get("primary")
     if target and target in VALID_TARGET_AGENTS:
         state.target_agents = [target]
-    if parsed.get("mode"):
-        state.mode = parsed["mode"]
-    if parsed.get("sub_agent"):
-        state.sub_agent = parsed["sub_agent"]
-    if parsed.get("models"):
-        state.models = _normalize_model_roles(parsed)
+
+    if parsed.get("features"):
+        state.features = parsed["features"]
+    elif parsed.get("mode") and parsed["mode"] != "main":
+        # Legacy: hybrid or delegated-apply → apply feature
+        state.features = ["apply"]
+
+    if parsed.get("review_chain"):
+        state.review_chain = parsed["review_chain"]
+    if parsed.get("apply_chain"):
+        state.apply_chain = parsed["apply_chain"]
+    elif parsed.get("sub_agent"):
+        # Legacy: sub-agent → apply chain primary
+        sub = parsed["sub_agent"]
+        model = None
+        models_dict = parsed.get("models") or {}
+        if models_dict.get("sub"):
+            model = models_dict["sub"]
+        elif models_dict.get(sub):
+            model = models_dict[sub]
+        state.apply_chain = [(sub, model)]
+
     if parsed.get("scope"):
         state.scope = parsed["scope"]
     return state
-
-
-def _normalize_model_roles(parsed: dict) -> dict[str, str]:
-    models = parsed.get("models") or {}
-    normalized: dict[str, str] = {}
-    if models.get("sub"):
-        normalized["sub"] = models["sub"]
-
-    sub_agent = parsed.get("sub_agent")
-    if sub_agent and not normalized.get("sub"):
-        normalized["sub"] = models.get(sub_agent) or models.get(f"{sub_agent} (sub)")
-
-    return {key: value for key, value in normalized.items() if value}
 
 
 def _parse_managed_block(text: str) -> dict:
@@ -337,7 +435,12 @@ def _parse_managed_block(text: str) -> dict:
                 key, _, value = kv.partition(":")
                 key = key.strip()
                 value = value.strip()
-                if key == "primary":
+
+                if key == "features":
+                    result["features"] = [f.strip() for f in value.split(",") if f.strip()]
+                elif key in ("review-chain", "apply-chain"):
+                    result[_chain_key(key)] = _parse_chain_value(value)
+                elif key == "primary":
                     result["primary"] = value
                 elif key == "mode":
                     result["mode"] = value
@@ -345,6 +448,8 @@ def _parse_managed_block(text: str) -> dict:
                     result["sub_agent"] = value
                 elif key == "scope":
                     result["scope"] = value
+
+            # Parse models sub-block
             in_models = False
             for line in block.strip().splitlines():
                 stripped = line.strip()
@@ -361,3 +466,27 @@ def _parse_managed_block(text: str) -> dict:
                     in_models = False
             return result
     return {}
+
+
+def _chain_key(block_key: str) -> str:
+    """Map 'review-chain' / 'apply-chain' to 'review_chain' / 'apply_chain'."""
+    return block_key.replace("-", "_")
+
+
+def _parse_chain_value(value: str) -> list[tuple[str, str | None]]:
+    """Parse 'agent=model, agent' into [(agent, model_or_none), ...]."""
+    chain: list[tuple[str, str | None]] = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" in entry:
+            agent, _, model = entry.partition("=")
+            agent = agent.strip()
+            model_val = model.strip() or None
+        else:
+            agent = entry.strip()
+            model_val = None
+        if agent:
+            chain.append((agent, model_val))
+    return chain

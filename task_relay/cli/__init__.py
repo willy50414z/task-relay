@@ -42,9 +42,12 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     install_group.add_argument("--primary", choices=INSTALL_TARGETS, help="Single installation target for backward compatibility")
     install_group.add_argument("--targets", type=parse_install_targets, help="Comma-separated installation targets (claude,codex)")
     install_parser.add_argument("--scope", choices=["user", "project"], help="Installation scope")
-    install_parser.add_argument("--mode", choices=["main", "hybrid", "delegated-apply"], help="Delegation mode")
-    install_parser.add_argument("--sub-agent", choices=["claude", "codex", "deepseek"], help="Delegation sub-agent")
-    install_parser.add_argument("--model", action="append", default=[], metavar="ROLE=MODEL_ID", help="Model for a role (supported role: sub)")
+    install_parser.add_argument("--feature", help="Features to enable: review,apply or none (comma-separated)")
+    install_parser.add_argument("--review-chain", help="Review agent chain: agent=model,agent=model,...")
+    install_parser.add_argument("--apply-chain", help="Apply agent chain: agent=model,agent=model,...")
+    install_parser.add_argument("--mode", choices=["main", "hybrid", "delegated-apply"], help="[legacy] Delegation mode — mapped to features")
+    install_parser.add_argument("--sub-agent", choices=["claude", "codex", "deepseek"], help="[legacy] Delegation sub-agent — mapped to apply chain")
+    install_parser.add_argument("--model", action="append", default=[], metavar="ROLE=MODEL_ID", help="[legacy] Model for a role")
     install_parser.add_argument("--cwd", help="Working directory (project scope only)")
     install_parser.set_defaults(handler=handle_install)
 
@@ -134,10 +137,27 @@ def _parse_models(raw: list[str]) -> dict[str, str]:
         model = model.strip()
         if not role or not model:
             raise ValueError(f"--model must use ROLE=MODEL_ID syntax, got: {entry}")
-        if role != "sub":
-            raise ValueError(f"--model role must be 'sub', got: {role}")
         models[role] = model
     return models
+
+
+def _parse_chain(value: str) -> list[tuple[str, str | None]]:
+    """Parse --review-chain / --apply-chain 'agent=model,agent' into [(agent, model), ...]."""
+    chain: list[tuple[str, str | None]] = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" in entry:
+            agent, _, model = entry.partition("=")
+            agent = agent.strip()
+            model_val = model.strip() or None
+        else:
+            agent = entry.strip()
+            model_val = None
+        if agent:
+            chain.append((agent, model_val))
+    return chain
 
 
 def _resolve_install_targets(args) -> list[str]:
@@ -153,8 +173,6 @@ def _print_install_results(results: list[InstallResult]) -> None:
         print(f"Task-relay delegation guidance {result.action}: {result.guidance_path}")
         print(f"  Primary agent : {result.primary_agent}")
         print(f"  Scope         : {result.scope}")
-        print(f"  Mode          : {result.mode}")
-        print(f"  Sub-agent     : {result.sub_agent}")
 
 
 # ── Handlers ────────────────────────────────────────────────────────
@@ -163,18 +181,69 @@ def handle_install(args) -> int:
     cwd = Path(args.cwd) if args.cwd else Path.cwd()
     target_agents = _resolve_install_targets(args)
 
-    flags_provided = any(
+    # Determine features: new --feature flag takes precedence over legacy --mode
+    features: list[str] = []
+    feature_flag = getattr(args, "feature", None)
+    mode_flag = getattr(args, "mode", None)
+    sub_agent_flag = getattr(args, "sub_agent", None)
+    model_flag = getattr(args, "model", [])
+
+    if feature_flag:
+        if feature_flag.lower() == "none":
+            features = []
+        else:
+            features = [f.strip() for f in feature_flag.split(",") if f.strip()]
+    elif mode_flag and mode_flag != "main":
+        features = ["apply"]
+
+    # Determine chains: new flags take precedence, legacy --sub-agent maps to apply chain
+    review_chain: list[tuple[str, str | None]] = []
+    apply_chain: list[tuple[str, str | None]] = []
+
+    review_chain_flag = getattr(args, "review_chain", None)
+    apply_chain_flag = getattr(args, "apply_chain", None)
+
+    if review_chain_flag:
+        review_chain = _parse_chain(review_chain_flag)
+    if apply_chain_flag:
+        apply_chain = _parse_chain(apply_chain_flag)
+    elif sub_agent_flag:
+        models = _parse_models(model_flag)
+        model = models.get("sub") or models.get(sub_agent_flag)
+        apply_chain = [(sub_agent_flag, model)]
+
+    # Transition from legacy model role format
+    if not review_chain_flag and not apply_chain_flag and model_flag and not sub_agent_flag and not mode_flag:
+        print("--model flag requires --review-chain or --apply-chain (or legacy --mode/--sub-agent)", file=sys.stderr)
+        return 1
+
+    new_flags_provided = any(
         value
         for value in (
             target_agents,
             args.scope,
-            args.mode,
-            args.sub_agent,
-            args.model,
+            feature_flag,
+            review_chain_flag,
+            apply_chain_flag,
         )
     )
-    if flags_provided and target_agents and args.scope and args.mode:
-        if args.mode == "main":
+    legacy_flags_provided = any(
+        value
+        for value in (
+            target_agents,
+            args.scope,
+            mode_flag,
+            sub_agent_flag,
+            model_flag,
+        )
+    )
+
+    flags_provided = new_flags_provided or legacy_flags_provided
+
+    if flags_provided and target_agents and args.scope and (features or feature_flag == "none" or (mode_flag == "main")):
+        # Non-interactive path: enough flags to proceed without wizard
+        if not features and not (legacy_flags_provided and mode_flag != "main" and sub_agent_flag):
+            # Clear / no delegation
             results = []
             for target in target_agents:
                 result = clear(primary_agent=target, scope=args.scope, cwd=cwd)
@@ -187,18 +256,18 @@ def handle_install(args) -> int:
                 print("No managed block found to clear.")
             return 0
 
-        if not args.sub_agent:
-            print("--sub-agent is required when mode is not 'main'", file=sys.stderr)
-            return 1
+        if not review_chain and not apply_chain:
+            if not sub_agent_flag:
+                print("--review-chain or --apply-chain is required when features are enabled", file=sys.stderr)
+                return 1
 
-        models = _parse_models(args.model)
         results = [
             install(
                 primary_agent=target,
                 scope=args.scope,
-                mode=args.mode,
-                sub_agent=args.sub_agent,
-                models=models,
+                features=features,
+                review_chain=review_chain,
+                apply_chain=apply_chain,
                 cwd=cwd,
             )
             for target in target_agents
@@ -220,9 +289,9 @@ def handle_install(args) -> int:
             install(
                 primary_agent=target,
                 scope=state.scope,
-                mode=state.mode,
-                sub_agent=state.sub_agent,
-                models=state.models,
+                features=state.features,
+                review_chain=state.review_chain,
+                apply_chain=state.apply_chain,
                 cwd=state.cwd,
             )
 
@@ -237,8 +306,8 @@ def handle_install(args) -> int:
 
 def _non_interactive_install_error() -> str:
     return (
-        "install requires required non-interactive flags when stdin is not a TTY: "
-        "--primary/--targets, --scope, --mode, and --sub-agent when mode is not 'main'"
+        "install requires non-interactive flags when stdin is not a TTY: "
+        "--primary/--targets, --scope, --feature, and --review-chain/--apply-chain when features are enabled"
     )
 
 
@@ -265,43 +334,39 @@ def _resolve_prefill_state(target_agents: list[str], scope: str | None, cwd: Pat
 
     if len(candidates) == 1:
         candidate = candidates[0]
-        return WizardState(
-            target_agents=ordered_targets,
-            scope=candidate.get("scope"),
-            mode=candidate.get("mode"),
-            sub_agent=candidate.get("sub_agent"),
-            models=_prefill_models(candidate),
-            cwd=cwd,
-        )
+        return _build_prefill_state(candidate, ordered_targets, cwd)
 
+    shared_features = _shared_list_value(candidates, "features")
+    shared_review_chain = _shared_chain_value(candidates, "review_chain")
+    shared_apply_chain = _shared_chain_value(candidates, "apply_chain")
     shared_scope = _shared_value(candidates, "scope")
-    shared_mode = _shared_value(candidates, "mode")
-    shared_sub_agent = _shared_value(candidates, "sub_agent")
-    shared_sub_model = _shared_sub_model(candidates)
 
-    if shared_scope and shared_mode and shared_sub_agent and shared_sub_model:
+    if shared_features is not None and shared_scope:
         return WizardState(
             target_agents=ordered_targets,
             scope=shared_scope,
-            mode=shared_mode,
-            sub_agent=shared_sub_agent,
-            models={"sub": shared_sub_model},
+            features=shared_features,
+            review_chain=shared_review_chain or [],
+            apply_chain=shared_apply_chain or [],
             cwd=cwd,
         )
 
     return WizardState(target_agents=ordered_targets if target_agents else [], cwd=cwd)
 
 
-def _prefill_models(parsed: dict) -> dict[str, str]:
-    models = parsed.get("models") or {}
-    sub_agent = parsed.get("sub_agent")
-    if models.get("sub"):
-        return {"sub": models["sub"]}
-    if sub_agent:
-        model = models.get(sub_agent) or models.get(f"{sub_agent} (sub)")
-        if model:
-            return {"sub": model}
-    return {}
+def _build_prefill_state(candidate: dict, target_agents: list[str], cwd: Path) -> WizardState:
+    features = candidate.get("features") or []
+    review_chain = candidate.get("review_chain") or []
+    apply_chain = candidate.get("apply_chain") or []
+
+    return WizardState(
+        target_agents=target_agents,
+        scope=candidate.get("scope"),
+        features=features,
+        review_chain=review_chain,
+        apply_chain=apply_chain,
+        cwd=cwd,
+    )
 
 
 def _shared_value(candidates: list[dict], key: str) -> str | None:
@@ -311,12 +376,18 @@ def _shared_value(candidates: list[dict], key: str) -> str | None:
     return None
 
 
-def _shared_sub_model(candidates: list[dict]) -> str | None:
-    values = [_prefill_models(candidate).get("sub") for candidate in candidates]
-    if any(value is None for value in values):
-        return None
+def _shared_list_value(candidates: list[dict], key: str) -> list | None:
+    values = [tuple(candidate.get(key) or []) for candidate in candidates]
     if len(set(values)) == 1:
-        return values[0]
+        return list(values[0])
+    return None
+
+
+def _shared_chain_value(candidates: list[dict], key: str) -> list | None:
+    values = [tuple((a, m) for a, m in (candidate.get(key) or [])) for candidate in candidates]
+    if len(set(values)) == 1:
+        # Convert tuple elements back to tuples
+        return [tuple(item) for item in values[0]]
     return None
 
 
