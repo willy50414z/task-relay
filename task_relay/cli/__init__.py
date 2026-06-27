@@ -5,9 +5,13 @@ from typing import Sequence
 
 from task_relay.cli.evaluate import handle_evaluate
 from task_relay.cli.health import handle_health
+from task_relay.cli.pack import handle_pack, handle_pack_lint, handle_pack_metrics
 from task_relay.cli.run import handle_run
+from task_relay.cli.trace import handle_trace
 from task_relay.delegation import InstallResult, clear, install, parse_existing_block, resolve_install_paths, uninstall
 from task_relay.wizard import WizardState, make_prompt_adapter, run_wizard
+
+from task_relay.packer import VALID_MODES as PACK_MODES
 
 AGENT_NAMES = ["claude", "codex", "deepseek"]
 INSTALL_TARGETS = ["claude", "codex"]
@@ -21,6 +25,29 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     add_target_args(run_parser, required=True)
     add_input_args(run_parser, "prompt")
     add_common_execution_args(run_parser)
+    run_parser.add_argument(
+        "--expect-output",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Verify the agent created this non-empty file; fail loudly otherwise. Repeatable.",
+    )
+    run_parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="Run the delegate in an ephemeral git worktree with push disabled; "
+             "changes land on a throwaway branch the primary can review/merge.",
+    )
+    run_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="With --isolate, delegate from clean HEAD even if the main working tree is dirty.",
+    )
+    run_parser.add_argument(
+        "--base",
+        default="HEAD",
+        help="With --isolate, branch the ephemeral worktree from this ref instead of HEAD.",
+    )
     run_parser.set_defaults(handler=handle_run)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run outcome-routed execution and emit JSON.")
@@ -31,6 +58,43 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--output-file", action="append", default=[], metavar="STATUS=PATH")
     evaluate_parser.add_argument("--json", action="store_true", required=True)
     evaluate_parser.set_defaults(handler=handle_evaluate)
+
+    pack_parser = subparsers.add_parser("pack", help="Generate a delegation packet with scoped OpenSpec context inlined.")
+    pack_parser.add_argument("--mode", required=True, choices=list(PACK_MODES))
+    pack_parser.add_argument("--change", required=True, help="OpenSpec change name")
+    pack_parser.add_argument("--task", help="Task id to reference in the packet")
+    pack_parser.add_argument("--read", action="append", default=[], dest="extra_reads", metavar="PATH", help="Extra repo file to inline. Repeatable.")
+    pack_parser.add_argument("--full-change-context", action="store_true", help="Inline the full change instead of scoped defaults.")
+    pack_parser.add_argument("--dry-run", action="store_true", help="Report selected files/sections without emitting the full packet.")
+    pack_parser.add_argument("--json", action="store_true", help="With --dry-run, emit the scope report as JSON.")
+    pack_parser.add_argument("--out", help="Write the packet to this file instead of stdout")
+    pack_parser.add_argument("--cwd", help="Project root containing openspec/ (defaults to current dir)")
+    pack_parser.add_argument("--diff-file", help="Explicit diff file for test-mode dynamic repo context.")
+    pack_parser.add_argument("--diff-from", help="Git ref to diff from for test-mode dynamic repo context.")
+    pack_parser.add_argument("--model-resolver", action="store_true", help="Enable opt-in model-assisted scope resolution contract.")
+    pack_parser.add_argument("--model-result", help="Structured model resolver result JSON for validation/testing.")
+    pack_parser.add_argument("--model-call-limit", type=int, default=1, help="Per-pack model resolver call limit.")
+    pack_parser.set_defaults(handler=handle_pack)
+
+    pack_metrics_parser = subparsers.add_parser("pack-metrics", help="Evaluate packer scope selection against a labeled eval set.")
+    pack_metrics_parser.add_argument("--eval-set", required=True, help="Path to a JSON eval set.")
+    pack_metrics_parser.add_argument("--cwd", help="Project root containing openspec/ (defaults to current dir)")
+    pack_metrics_parser.add_argument("--json", action="store_true", required=True)
+    pack_metrics_parser.set_defaults(handler=handle_pack_metrics)
+
+    pack_lint_parser = subparsers.add_parser("pack-lint", help="Advisory diagnostics for packer scope signals and fallback behavior.")
+    pack_lint_parser.add_argument("--change", required=True, help="OpenSpec change name")
+    pack_lint_parser.add_argument("--task", help="Task id to lint")
+    pack_lint_parser.add_argument("--mode", default="implementation-draft", choices=list(PACK_MODES))
+    pack_lint_parser.add_argument("--cwd", help="Project root containing openspec/ (defaults to current dir)")
+    pack_lint_parser.add_argument("--json", action="store_true", required=True)
+    pack_lint_parser.set_defaults(handler=handle_pack_lint)
+
+    trace_parser = subparsers.add_parser("trace", help="Summarize delegation trace records.")
+    trace_parser.add_argument("--summary", action="store_true", help="Print aggregate totals from the trace sink.")
+    trace_parser.add_argument("--change", help="Filter the summary to one OpenSpec change.")
+    trace_parser.add_argument("--cwd", help="Project root containing .task_relay/ (defaults to current dir)")
+    trace_parser.set_defaults(handler=handle_trace)
 
     health_parser = subparsers.add_parser("health", help="Check agent availability.")
     health_parser.add_argument("--target", choices=AGENT_NAMES)

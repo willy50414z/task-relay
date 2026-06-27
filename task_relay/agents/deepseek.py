@@ -33,10 +33,18 @@ class DeepSeekRunner:
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = DEEPSEEK_SUBAGENT_MODEL
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = DEEPSEEK_SUBAGENT_MODEL
         env["CLAUDE_CODE_EFFORT_LEVEL"] = request.effort or self.default_effort
-        command = [resolve_cli("claude"), "--print", "--dangerously-skip-permissions"]
+        if request.extra_env:
+            env.update(request.extra_env)
+        command = [
+            resolve_cli("claude"),
+            "--print",
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+        ]
         if request.model:
             command.extend(["--model", request.model])
-        stdout = run_subprocess(
+        result = run_subprocess(
             command,
             stdin_input=request.prompt,
             cwd=request.cwd,
@@ -44,8 +52,16 @@ class DeepSeekRunner:
             encoding=request.encoding,
             timeout=request.timeout,
             target=self.name,
+            wait_on_hard_quota=request.wait_on_hard_quota,
+            parse_json_output=True,
         )
-        return AgentRunResult(stdout=stdout, target=self.name)
+        return AgentRunResult(
+            stdout=result.stdout,
+            target=self.name,
+            model=model,
+            retries=result.retries,
+            usage=result.usage,
+        )
 
     def check(self) -> TargetStatus:
         return TargetStatus(ok=True)

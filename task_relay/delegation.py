@@ -168,10 +168,16 @@ def _features_policy(
         policy.append(f"2. Delegate to review chain (primary: {primary_review}).")
         policy.append(f"3. The review agent evaluates requirement clarity, direction correctness,")
         policy.append(f"   and implementation plan completeness.")
-        policy.append(f"4. The review agent writes findings to `spec/delegent_review.md`.")
+        policy.append(f"4. The review agent writes findings to `spec/delegation_review.md`.")
         policy.append(f"5. The review agent MUST ask the user when encountering ambiguity")
         policy.append(f"   rather than defining solutions independently.")
-        policy.append(f"6. {primary_agent} reads the review and updates proposal artifacts as needed.")
+        policy.append(f"6. Delegate with `trly run --target <agent> --prompt-file <packet>"
+                      f" --expect-output spec/delegation_review.md` so a missing or empty review"
+                      f" fails loudly instead of being trusted from stdout.")
+        policy.append(f"7. If the run fails with a delegation-output error, re-run or escalate;"
+                      f" do NOT treat the review as done.")
+        policy.append(f"8. {primary_agent} MUST read the review artifact content before adopting it; a non-empty file only proves the gate passed.")
+        policy.append(f"9. {primary_agent} reads the review and updates proposal artifacts as needed.")
         policy.append("")
         policy.append("Review agent non-goals: do not modify OpenSpec state, mark tasks,")
         policy.append("perform destructive operations, or make architecture decisions.")
@@ -183,9 +189,21 @@ def _features_policy(
         primary_apply = apply_chain[0][0]
         policy.append(f"When implementation is ready, {primary_agent} SHALL:")
         policy.append(f"1. Package the apply request using implementation-draft or test-draft templates.")
-        policy.append(f"2. Delegate to apply chain (primary: {primary_apply}).")
-        policy.append(f"3. The apply agent produces patches or implementation reports.")
-        policy.append(f"4. {primary_agent} verifies output before marking tasks complete.")
+        policy.append(f"2. For multi-task apply, open one change worktree `chg/<change-name>` from HEAD as"
+                      f"   the integration sandbox; single trivial delegations may skip this and use one"
+                      f"   isolated task branch directly.")
+        policy.append(f"3. Delegate each implementation or test task to apply chain (primary: {primary_apply})"
+                      f"   with `trly run --target <agent> --prompt-file <packet> --isolate --base <ref>`.")
+        policy.append(f"4. `--isolate` runs the delegate in an ephemeral git worktree on a throwaway"
+                      f"   branch `tr/<task-id>` with `git push` disabled; `--base` points at the change"
+                      f"   branch tip so dependent tasks see previously accepted work.")
+        policy.append(f"5. Apply is phased: develop and commit onto task branches, merge accepted task"
+                      f"   branches back into `chg/<change-name>`, run disjoint test delegations from the"
+                      f"   accumulated change branch, then run primary integration tests in the change"
+                      f"   worktree before a single final merge to the real branch.")
+        policy.append(f"6. {primary_agent} reviews each branch diff before merge and marks tasks complete"
+                      f"   only after the accepted work is integrated. An empty branch fails loudly (no"
+                      f"   silent success).")
         policy.append("")
         policy.append("Apply agent non-goals: do not modify OpenSpec state, mark tasks checkboxes,")
         policy.append("or make architecture/security/migration decisions.")
@@ -391,6 +409,48 @@ def _build_skill_md(
             role = "primary" if i == 0 else f"fallback {i}"
             model_str = model or "default"
             lines.append(f"- {role}: **{agent}** (model: {model_str})")
+        lines.append("")
+
+    lines.append("### Primary Execution Workflow")
+    lines.append("")
+    lines.append("The primary agent should use task-relay explicitly rather than asking a")
+    lines.append("delegate from free-form chat. Package context first, then run the selected")
+    lines.append("chain target with the packet file.")
+    lines.append("")
+    if "review" in features and review_chain:
+        primary_review = review_chain[0][0]
+        lines.append("#### Review")
+        lines.append("")
+        lines.append("Use review during the OpenSpec propose phase:")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("trly pack --mode review-proposal --change <change> --out <packet>")
+        lines.append(
+            f"trly run --target {primary_review} --prompt-file <packet> --expect-output spec/delegation_review.md"
+        )
+        lines.append("```")
+        lines.append("")
+        lines.append("The review delegate must write `spec/delegation_review.md`. The primary")
+        lines.append("agent must read that artifact before accepting findings; a non-empty file")
+        lines.append("only proves the output gate passed.")
+        lines.append("")
+    if "apply" in features and apply_chain:
+        primary_apply = apply_chain[0][0]
+        lines.append("#### Apply")
+        lines.append("")
+        lines.append("Use apply during implementation or test drafting:")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("trly pack --mode implementation-draft --change <change> --task <task-id> --out <packet>")
+        lines.append(f"trly run --target {primary_apply} --prompt-file <packet> --isolate --base <base-ref>")
+        lines.append("```")
+        lines.append("")
+        lines.append("For test packets, use `--mode test-draft` and add `--diff-from` or")
+        lines.append("`--diff-file` when dynamic changed-file context is needed. `--isolate`")
+        lines.append("runs the delegate in an ephemeral git worktree on a throwaway `tr/<id>`")
+        lines.append("branch with `git push` disabled. The primary agent reviews and integrates")
+        lines.append("accepted branch diffs, runs final verification, and only then marks")
+        lines.append("OpenSpec tasks complete.")
         lines.append("")
 
     lines.append("### Output Modes")

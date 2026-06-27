@@ -32,7 +32,7 @@ and implementation plan completeness from an objective perspective.
 - If there are alternative approaches worth considering, present them but let the user decide.
 
 ## Output
-- Write review findings to `spec/delegent_review.md`
+- Write review findings to `spec/delegation_review.md`
 - Format: structured report with each finding tagged by severity (blocker / major / minor / suggestion)
 - Each finding must include: problem description, impact scope, suggested direction for resolution
 

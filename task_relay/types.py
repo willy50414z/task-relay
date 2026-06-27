@@ -39,12 +39,37 @@ class AgentRunRequest:
     effort: str | None = None
     timeout: float | None = 1800
     encoding: str = "utf-8"
+    # When False, hard quota exhaustion raises immediately instead of waiting out
+    # the retry budget — used by fast-fallback to move to the next chain agent.
+    wait_on_hard_quota: bool = True
+    # Extra environment merged into the agent subprocess (e.g. worktree push-disable).
+    extra_env: dict[str, str] | None = None
+    # Base ref used when isolated work should branch from something other than HEAD.
+    base_ref: str = "HEAD"
+    # Branch name of the isolated worktree when applicable.
+    branch: str | None = None
+    # Stable session id for per-delegation trace records.
+    session: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
 class AgentRunResult:
     stdout: str
     target: str
+    model: str | None = None
+    retries: int = 0
+    usage: AgentUsage | None = None
+
+    def __iter__(self):
+        yield self.stdout
+        yield self.target
 
 
 PurposeInput = str | Callable[[Path], str]

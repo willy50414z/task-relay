@@ -22,3 +22,15 @@ class OutcomeResolutionError(TaskRelayError):
     """Workspace outcome files could not be resolved."""
 
 
+class DelegationOutputError(TaskRelayError):
+    """A delegation's declared output artifact is missing or empty."""
+
+
+class PacketGenerationError(TaskRelayError):
+    """A delegation packet could not be generated (unknown mode or unresolvable read)."""
+
+
+
+
+class DirtyWorkingTreeError(TaskRelayError):
+    """Isolated delegation refused to run against a dirty main working tree."""

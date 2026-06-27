@@ -43,3 +43,15 @@ The new project should preserve the working behavior users already rely on while
 - CLI behavior remains functionally equivalent for run/evaluate/health/install flows, with renamed commands and compatibility warnings where appropriate.
 - Agent behavior remains synchronous and local-process based in v0.2; async jobs, persistent storage, HTTP APIs, webhooks, API-key management, npm packaging, and full OpenCLI browser relay are explicitly out of scope.
 - Tests need to cover both the new public surface and the temporary compatibility surface so migration regressions are visible.
+
+## Candidate Requirements (not yet ratified)
+
+An explore-mode review of the delegation runtime (2026-06-26) surfaced four candidate
+requirements not yet folded into the validated capability specs. They are captured in
+[`candidate-requirements.md`](./candidate-requirements.md) and remain OUT of scope until
+adopted:
+
+- **C1** Verifiable delegation output contract (delegation currently uses the raw `run` pipe, bypassing the `evaluate`/`resolver` guarantees).
+- **C2** Observable, bounded, fast-fallback quota handling (current retry can hang ~24h silently and defeats the fallback chain).
+- **C3** Enforced delegation trust boundary (delegates run with safety rails off; "primary owns destructive ops" is prompt-only, unenforced).
+- **C4** Packet generation command that inlines scoped context (cuts duplicate token consumption, enforces `Allowed direct reads`).

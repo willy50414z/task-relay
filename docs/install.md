@@ -55,8 +55,8 @@ task-relay 透過在 agent 指引檔案中寫入 managed block 來設定委派�
 
 | 功能 | 說明 |
 |------|------|
-| `review` | Review — 審查 agent 驗證提案的清晰度、正確性與完整性 |
-| `apply` | Apply — 實作 agent 執行變更（取代舊版 sub-agent 概念） |
+| `review` | Review — 在 propose phase 委派審查 agent 檢查需求清晰度、方向正確性與實作計畫完整性，產出 `spec/delegation_review.md` |
+| `apply` | Apply — 在 implementation phase 委派實作 / 測試 agent 產出 patch 或實作報告；primary agent 仍負責整合、驗證與 OpenSpec 狀態變更 |
 
 若完全不選功能，則等同於 `mode: main`，會清除現有的 managed block。
 
@@ -160,13 +160,23 @@ Primary model (codex) owns:
 - Integration of delegated output and final verification.
 
 ## Review Workflow (propose phase)
-...
+
+When a proposal is ready for review, the primary agent packages the proposal context with the `review-proposal` template, delegates to the review chain, requires output at `spec/delegation_review.md`, reads that artifact, and updates proposal artifacts as needed.
+
+Review agents evaluate requirement clarity, direction correctness, and implementation plan completeness. They must ask the user when ambiguity requires a product / architecture decision. They must not modify OpenSpec state, mark tasks, perform destructive operations, or make architecture decisions.
 
 ## Apply Workflow (implementation phase)
-...
+
+When implementation is ready, the primary agent packages the apply request with `implementation-draft` or `test-draft`, delegates bounded tasks to the apply chain, reviews the resulting branch diff or report, runs verification, and only then marks tasks complete.
+
+Apply agents may draft or implement focused changes, but they must not modify OpenSpec state, mark `tasks.md` checkboxes, or make architecture / security / migration decisions.
 
 ## Task Tags
-...
+
+- `[delegate:review]` — route proposal review to review chain.
+- `[delegate:<apply-agent>]` — route implementation to apply chain.
+- `[delegate:test]` — route test authoring.
+- `[<primary-agent>-only]` — keep in primary agent.
 
 <!-- task-relay:end -->
 ```
@@ -181,9 +191,68 @@ Primary model (codex) owns:
 | `review-chain` | Review agent 鏈，格式 `agent=model, agent` |
 | `apply-chain` | Apply agent 鏈，格式 `agent=model, agent` |
 
+## Review / Apply 工作流細節
+
+`trly install` 只負責把委派政策寫進 agent guidance；實際委派仍由 primary agent 明確打包 context、呼叫 delegate、驗證輸出並整合結果。Primary agent 永遠保留以下責任：
+
+- 架構、安全、資料遷移、破壞性操作與 credentials 決策。
+- OpenSpec artifact interpretation、scope 判斷與狀態變更。
+- 讀取 delegate 產物、整合變更、執行最終驗證。
+
+### Review 功能
+
+Review 用於 propose phase，不是實作流程。典型流程：
+
+1. Primary agent 使用 `review-proposal` template 打包提案 context。
+2. 呼叫 review chain 的 primary agent；若失敗可依 chain 順序 fallback。
+3. Review agent 檢查 requirement clarity、direction correctness、implementation plan completeness。
+4. Review agent 將 findings 寫到 `spec/delegation_review.md`。
+5. 執行時應使用 `--expect-output spec/delegation_review.md`，讓缺檔或空檔直接失敗。
+6. Primary agent 必須實際讀取 `spec/delegation_review.md`；非空檔只代表 gate 通過，不代表內容正確。
+7. 若 review 需要產品、架構或 scope 決策，review agent 應提出問題，由使用者或 primary agent 決定，而不是自行定義解法。
+
+建議命令形狀：
+
+```bash
+trly pack --mode review-proposal --change <change> --out /tmp/<change>-review.md
+trly run --target <review-agent> --prompt-file /tmp/<change>-review.md \
+  --expect-output spec/delegation_review.md
+```
+
+Review agent 的 non-goals：不得修改 OpenSpec state、不得勾選 tasks、不得執行破壞性操作、不得替 primary 做架構 / 安全 / migration 決策。
+
+### Apply 功能
+
+Apply 用於 implementation phase。Delegate 可以產出 patch、修改建議、實作報告或測試草案，但完成定義仍由 primary agent 控制。典型流程：
+
+1. Primary agent 使用 `implementation-draft` 或 `test-draft` template 打包單一 task 的 bounded context。
+2. 對於多 task 變更，先建立 `chg/<change-name>` 這類整合分支 / worktree 作為累積基準；單一小任務可直接從目前 base 委派。
+3. 每個實作或測試 task 用 `trly run --isolate --base <ref>` 執行，delegate 在臨時 worktree 的 `tr/<id>` 分支上工作，`git push` 會被停用。
+4. Primary agent 檢查 delegate branch diff 或報告，決定是否接受、修改或丟棄。
+5. 接受後才合併回整合分支 / 主工作樹，並執行測試。
+6. Primary agent 驗證通過後才更新 OpenSpec `tasks.md` checkbox。空分支會失敗，不視為成功。
+
+建議命令形狀：
+
+```bash
+trly pack --mode implementation-draft --change <change> --task <task-id> \
+  --out /tmp/<change>-<task-id>-apply.md
+trly run --target <apply-agent> --prompt-file /tmp/<change>-<task-id>-apply.md \
+  --isolate --base <base-ref>
+```
+
+測試委派可改用 `test-draft`，並在需要時加入動態 diff context：
+
+```bash
+trly pack --mode test-draft --change <change> --task <task-id> \
+  --diff-from <base-ref> --out /tmp/<change>-<task-id>-test.md
+```
+
+Apply agent 的 non-goals：不得修改 OpenSpec scope、不得勾選 tasks、不得執行破壞性操作、不得做 architecture / security / credential / migration 決策。
+
 ## 技能包結構
 
-安裝時會在對應的技能目錄下建立 `task-relay-delegation/` 技能包：
+安裝時會在對應的技能目錄下建立 `task-relay-delegation/` 技能包。`SKILL.md` 會寫入 review/apply chain、primary agent 的 `trly pack` / `trly run` 執行方式，以及 delegate 的輸出模式與 non-goals：
 
 ```
 {skill_root}/task-relay-delegation/
@@ -208,9 +277,9 @@ Primary model (codex) owns:
 
 | 範本 | 用途 |
 |------|------|
-| `review-proposal` | 審查提案的清晰度、正確性與完整性 |
-| `implementation-draft` | 逐檔編輯計畫或 patch |
-| `test-draft` | 要新增的測試及執行指令 |
+| `review-proposal` | Propose phase 審查 packet；輸出 findings 到 `spec/delegation_review.md`，供 primary agent 讀取後修正 proposal/design/tasks |
+| `implementation-draft` | Implementation phase 實作 packet；輸出 patch、分支變更或逐檔編輯計畫，供 primary agent review / integrate |
+| `test-draft` | 測試委派 packet；輸出要新增的測試、驗證指令或 focused validation plan |
 | `review` | 針對 diff 或 spec 的審查發現（含嚴重性） |
 | `diagnosis` | 失敗命令的根因分析與修復建議 |
 
@@ -326,6 +395,29 @@ trly install
 #   features: apply
 #   apply chain: deepseek
 ```
+
+## 委派執行的強化行為（runtime）
+
+安裝的 managed block 會引導 primary agent 使用以下強化過的委派流程：
+
+- **Review 產出驗證**：review 委派以 `trly run ... --expect-output spec/delegation_review.md`
+  執行，若審查檔未產生或為空會大聲失敗，而非僅憑 delegate 的 stdout 宣稱成功。primary 仍必須實際閱讀審查內容；非空只代表通過 gate，不代表內容正確。
+  （審查檔已由舊名 `delegent_review.md` 更名為 `delegation_review.md`。）
+- **Apply 隔離**：apply 委派以 `trly run ... --isolate` 執行，delegate 在臨時 git worktree
+  的丟棄分支 `tr/<id>` 中工作、`git push` 被停用，變更不會碰到真實工作樹；primary 檢視並合併
+  該分支後才標記任務完成。空分支會大聲失敗。
+- **Quota 韌性**：額度/限流錯誤改為有上限、會記 log 的重試（預設硬性耗盡 30 分鐘上限），
+  不再靜默卡住約 24 小時。可透過 `LLM_QUOTA_*` 環境變數調整；`LLM_FAST_FALLBACK=1` 可在
+  硬性耗盡時改為立即切換 chain 中的下一個 agent（預設關閉，維持「等待較便宜 agent」的成本優勢）。
+
+威脅模型為「delegate 不可靠但非惡意」：worktree + 停用 push 保護真實工作樹與遠端；完整的
+讀取/網路關押（OS 沙箱）為後續工作，不在此版本範圍。
+
+## 升級既有安裝
+
+managed block 的工作流文字會隨套件更新而改變（worktree/隔離流程、產出驗證、檔名更名）。
+**既有安裝不會自動遷移**——升級套件後請重新執行 `trly install`（沿用原本的 targets/scope/features）
+以將最新的工作流文字寫入指引檔案。
 
 ## 內部實作參考
 

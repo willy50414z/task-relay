@@ -13,20 +13,37 @@ class ClaudeRunner:
         self.default_effort = default_effort
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
-        command = [resolve_cli("claude"), "--print", "--dangerously-skip-permissions"]
+        command = [
+            resolve_cli("claude"),
+            "--print",
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+        ]
         model = request.model or self.default_model
         if model:
             command.extend(["--model", model])
-        stdout = run_subprocess(
+        env = dict(os.environ)
+        if request.extra_env:
+            env.update(request.extra_env)
+        result = run_subprocess(
             command,
             stdin_input=request.prompt,
             cwd=request.cwd,
-            env=dict(os.environ),
+            env=env,
             encoding=request.encoding,
             timeout=request.timeout,
             target=self.name,
+            wait_on_hard_quota=request.wait_on_hard_quota,
+            parse_json_output=True,
         )
-        return AgentRunResult(stdout=stdout, target=self.name)
+        return AgentRunResult(
+            stdout=result.stdout,
+            target=self.name,
+            model=model,
+            retries=result.retries,
+            usage=result.usage,
+        )
 
     def check(self) -> TargetStatus:
         binary = resolve_cli("claude")
