@@ -17,7 +17,7 @@ from task_relay.review_config import (
     migrate_legacy_review_chain,
     parse_role_entries,
 )
-from task_relay.review_gate import (
+from task_relay.workflow.review_gate import (
     APPROVE_EXIT_CODE,
     CONFIG_EXIT_CODE,
     REJECT_EXIT_CODE,
@@ -33,7 +33,7 @@ from task_relay.wizard import WizardState, make_prompt_adapter, run_wizard
 
 from task_relay.packer import VALID_MODES as PACK_MODES
 
-AGENT_NAMES = ["claude", "codex", "deepseek"]
+AGENT_NAMES = ["claude", "codex", "deepseek", "zerotoken"]
 INSTALL_TARGETS = ["claude", "codex"]
 
 
@@ -120,6 +120,32 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     health_parser.add_argument("--target", choices=AGENT_NAMES)
     health_parser.add_argument("--json", action="store_true", required=True)
     health_parser.set_defaults(handler=handle_health)
+
+    dev_parser = subparsers.add_parser("dev", help="Workflow development commands.")
+    dev_sub = dev_parser.add_subparsers(dest="dev_command")
+
+    dev_steps_parser = dev_sub.add_parser("steps", help="List all workflow steps and their agent/model config.")
+    dev_steps_parser.add_argument("--cwd", help="Project root (defaults to current dir)")
+    dev_steps_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    dev_steps_parser.set_defaults(handler=handle_dev_steps)
+
+    dev_config_parser = dev_sub.add_parser("config", help="View or modify a workflow step config.")
+    dev_config_parser.add_argument("--step", required=True, help="Step name (explore, propose, review, arbiter, apply)")
+    dev_config_parser.add_argument("--target", help="Agent target (claude, codex, deepseek, zerotoken)")
+    dev_config_parser.add_argument("--model", help="Model identifier")
+    dev_config_parser.add_argument("--fallback", help="Fallback agent=model")
+    dev_config_parser.add_argument("--cwd", help="Project root (defaults to current dir)")
+    dev_config_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    dev_config_parser.set_defaults(handler=handle_dev_config)
+
+    review_parser = subparsers.add_parser("review", help="Run review against an OpenSpec change (convenience wrapper for review-gate).")
+    review_parser.add_argument("--change", required=True, help="OpenSpec change name")
+    review_parser.add_argument("--target", help="Override review agent")
+    review_parser.add_argument("--model", help="Override model")
+    review_parser.add_argument("--no-save", action="store_true", help="One-time override, do not persist to AGENTS.md")
+    review_parser.add_argument("--cwd", help="Project root (defaults to current dir)")
+    review_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    review_parser.set_defaults(handler=handle_review)
 
     review_gate_parser = subparsers.add_parser("review-gate", help="Run the full proposal review gate.")
     review_gate_parser.add_argument("--change", required=True, help="OpenSpec change name")
@@ -564,6 +590,153 @@ def handle_uninstall(args) -> int:
     for result in results:
         print(f"Removed delegation guidance: {result.guidance_path} (scope: {result.scope})")
     return 0
+
+
+def handle_dev_steps(args) -> int:
+    """trly dev steps — list all workflow step configs."""
+    from task_relay.workflow.run_review import is_configured, list_steps
+
+    if not is_configured(cwd=args.cwd):
+        print("No task-relay config found. Run 'trly install' first.", file=sys.stderr)
+        return 1
+
+    steps = list_steps(cwd=args.cwd)
+    if not steps:
+        print("No workflow step configs found in AGENTS.md managed block.", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        sys.stdout.write(json.dumps(steps, ensure_ascii=False, indent=2) + "\n")
+    else:
+        print(f"{'STEP':<12} {'TARGET':<12} {'MODEL':<28} {'FALLBACK':<30}")
+        print("-" * 82)
+        for step_name in ("explore", "propose", "review", "arbiter", "apply"):
+            cfg = steps.get(step_name, {})
+            target = cfg.get("target", "-")
+            model = cfg.get("model", "-")
+            fallback = "-"
+            if cfg.get("fallback_agent"):
+                fallback = f"{cfg['fallback_agent']}={cfg.get('fallback_model', '')}"
+            print(f"{step_name:<12} {target:<12} {model:<28} {fallback:<30}")
+    return 0
+
+
+def handle_dev_config(args) -> int:
+    """trly dev config — view or modify a workflow step config."""
+    from task_relay.workflow.run_review import get_step_config, is_configured
+
+    if not is_configured(cwd=args.cwd):
+        print("No task-relay config found. Run 'trly install' first.", file=sys.stderr)
+        return 1
+
+    if not args.target and not args.model and not args.fallback:
+        # View mode
+        cfg = get_step_config(args.step, cwd=args.cwd)
+        if getattr(args, "json", False):
+            sys.stdout.write(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+        else:
+            if not cfg:
+                print(f"No config found for step: {args.step}")
+                return 1
+            print(f"Step: {args.step}")
+            print(f"  target:   {cfg.get('target', '-')}")
+            print(f"  model:    {cfg.get('model', '-')}")
+            fallback = "-"
+            if cfg.get("fallback_agent"):
+                fallback = f"{cfg['fallback_agent']}={cfg.get('fallback_model', '')}"
+            print(f"  fallback: {fallback}")
+        return 0
+
+    # Modify mode — read AGENTS.md, update the line, write back
+    base = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        path = base / name
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        start = text.find("<!-- task-relay:start -->")
+        end = text.find("<!-- task-relay:end -->")
+        if start == -1 or end == -1:
+            continue
+
+        prefix = f"workflow.{args.step}:"
+        old_line = None
+        lines = text[start:end].splitlines()
+        for line in lines:
+            stripped = line.strip().lstrip("- ").strip()
+            if stripped.startswith(prefix):
+                old_line = line
+                break
+
+        if old_line is None:
+            print(f"No existing config for step '{args.step}'. Use 'trly install' to configure.", file=sys.stderr)
+            return 1
+
+        parts = []
+        if args.target:
+            parts.append(f"target={args.target}")
+        if args.model:
+            parts.append(f"model={args.model}")
+        if args.fallback:
+            parts.append(f"fallback={args.fallback}")
+
+        if not parts:
+            return 0
+
+        new_prefix = f"- workflow.{args.step}: "
+        new_line = new_prefix + ", ".join(parts)
+
+        new_text = text[:start] + text[start:end].replace(old_line, new_line) + text[end:]
+        path.write_text(new_text, encoding="utf-8")
+        print(f"Updated {args.step}: {', '.join(parts)}")
+        return 0
+
+    print("No AGENTS.md or CLAUDE.md found.", file=sys.stderr)
+    return 1
+
+
+def handle_review(args) -> int:
+    """trly review — convenience wrapper for review-gate with per-step config."""
+    from task_relay.workflow.run_review import is_configured, run_review
+
+    if not is_configured(cwd=args.cwd):
+        print("No task-relay config found. Starting cold-start setup...")
+        print("Run 'trly install' for full configuration, or specify --target directly.")
+        if not args.target:
+            print("Error: --target is required when no config exists.", file=sys.stderr)
+            return 1
+
+    try:
+        result = run_review(
+            args.change,
+            target=getattr(args, "target", None),
+            model=getattr(args, "model", None),
+            cwd=args.cwd,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        payload = {
+            "decision": result.decision,
+            "summary_path": str(result.summary_path),
+            "result_path": str(result.result_path),
+            "reviewers": [str(item.path) for item in result.reviewer_artifacts],
+            "arbiters": [str(item.path) for item in result.arbiter_artifacts],
+        }
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    else:
+        print(f"Decision: {result.decision}")
+        print(f"Summary:  {result.summary_path}")
+        print(f"Result:   {result.result_path}")
+        if result.decision == "REVISE":
+            for arbiter in result.arbiter_artifacts:
+                for item in arbiter.payload.get("actionable_items", []):
+                    print(f"  - {item.get('target_artifact')}: {item.get('required_change')}")
+
+    return 0 if result.decision == "APPROVE" else 1
+
 
 
 def handle_review_gate(args) -> int:

@@ -2,10 +2,11 @@ from task_relay.agents.base import AgentRunner
 from task_relay.agents.claude import ClaudeRunner
 from task_relay.agents.codex import CodexRunner
 from task_relay.agents.deepseek import DeepSeekRunner
+from task_relay.agents.zerotoken import TokenFreeGatewayRunner
 from task_relay.errors import AgentNotFoundError
 from task_relay.types import TargetStatus
 
-BUILTIN_AGENTS = ("claude", "codex", "deepseek")
+BUILTIN_AGENTS = ("claude", "codex", "deepseek", "zerotoken")
 
 
 def resolve(name: str | None = None) -> AgentRunner:
@@ -16,6 +17,8 @@ def resolve(name: str | None = None) -> AgentRunner:
         return CodexRunner()
     if agent_name == "deepseek":
         return DeepSeekRunner()
+    if agent_name == "zerotoken":
+        return TokenFreeGatewayRunner()
     raise AgentNotFoundError(f"Unknown agent: {agent_name}")
 
 

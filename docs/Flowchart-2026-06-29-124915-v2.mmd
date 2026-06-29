@@ -1,0 +1,280 @@
+---
+config:
+  theme: redux
+  layout: dagre
+---
+flowchart TB
+    %% ╔══════════════════════════════════════════════════════════════════╗
+    %% ║                      C O L O R   L E G E N D                   ║
+    %% ╠══════════════════════════════════════════════════════════════════╣
+    %% ║  🟠 Orange  #FF6D00  → 新功能 (尚未實作)                       ║
+    %% ║  🟡 Amber   #FFAB00  → 部分實現 (有雛形，待整合)              ║
+    %% ║  🟣 Purple  #AB47BC  → 待討論 (設計方案尚未定案)              ║
+    %% ║  🔵 Blue    #42A5F5  → 註解/說明 (純資訊節點)                 ║
+    %% ║  ⚪ Grey    #9E9E9E  → 邏輯判斷 (條件分支，不需獨立實作)      ║
+    %% ║  🟢 Green   #66BB6A  → 已完成 (現有流程已可運作)              ║
+    %% ╚══════════════════════════════════════════════════════════════════╝
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Phase 1: 需求釐清 (Requirement Clarification)
+    %% ═══════════════════════════════════════════════════════════════════
+
+    a1["📋 Phase 1: 需求釐清
+    ─────────────────────
+    此階段由 [plan agent] 主導，
+    透過對話釐清 user 真正想做什麼。
+    ⚡ 推理任務不需要本地檔案，
+    可透過 Zero-Token Gateway
+    呼叫 DeepSeek/ChatGPT/Gemini 節省 token"]:::annotation
+
+    n1["[node] 呼叫 [plan agent] 透過 /opsx:explore
+    理解並確認需求"]:::newFeature
+
+    n2{"需要拆解成
+    多個階段開發?"}:::decision
+
+    n3["[plan agent] 建議 user 將需求拆分成多個階段，
+    並明確寫出多個階段的階段性目標"]:::newFeature
+
+    n5["[plan agent] 跟 user 討論好每個階段性任務拆分後，
+    先產出 openspec change 目錄，
+    裡面產出 roadmap.md 列出整個開發計畫
+    及拆分的每個階段性目標，
+    然後再次透過 /opsx:explore 逐個探索子需求的細節"]:::needsDiscussion
+
+    n5b["💡 此處的遞迴探索機制：
+    ─────────────────────
+    - 每個子需求獨立走一次 Phase 1~5
+    - 各自產出獨立的 change 目錄
+    - 子需求的 roadmap 匯總回主 roadmap
+    - 需討論：用 LangGraph subgraph 還是
+      遞迴呼叫主 flow？"]:::annotation
+
+    n1 --> n2
+    n2 -- "YES" --> n3
+    n3 --> n5
+    n5 --> n4
+    n5 -.-> n5b
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Phase 2: 計畫產生 (Plan Generation)
+    %% ═══════════════════════════════════════════════════════════════════
+
+    a2["📋 Phase 2: 計畫產生
+    ─────────────────────
+    確認需求後，決定如何處理：
+    - 小修改 → 直接改 (bypass 審查)
+    - 正規需求 → /opsx:propose 產出文件
+    ⚠️ 需討論：小修改的判定標準？
+      (ex: 改動 < 50 行? 只改一個檔案?)"]:::annotation
+
+    n2 -- "NO" --> n4
+    n4{"需求很小
+    (小 bug / 小 change)
+    可直接修改?"}:::decision
+
+    n6["直接修改
+    (bypass propose + review)"]:::completed
+
+    n7["[plan agent] 根據 /opsx:propose
+    將需求產出開發計畫"]:::partialImpl
+
+    n4 -- "YES" --> n6
+    n4 -- "NO" --> n7
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Phase 3: 審查與仲裁 (Review & Arbitration)
+    %% ═══════════════════════════════════════════════════════════════════
+
+    a3["📋 Phase 3: 審查與仲裁
+    ─────────────────────
+    產出 propose 後進入雙層審查：
+    1. 並行 Reviewer 審查 (多人同時)
+    2. Arbiter 仲裁 (有爭議時)
+    ⚡ Reviewer & Arbiter 推理任務
+    可走 Zero-Token Gateway"]:::annotation
+
+    n8["[node] 呼叫 reviewer review propose，
+    將意見產出到 delegate_advice.md"]:::partialImpl
+
+    n15{"有修改意見?"}:::decision
+
+    n9["[node] 呼叫 Arbiter 進行仲裁
+    (PASS / CONCERNS / BLOCKED)"]:::partialImpl
+
+    n10["[node] 呼叫 [apply agent]
+    根據仲裁結果修改開發計畫"]:::needsDiscussion
+
+    n10b["💡 apply agent 如何修改計畫？
+    ─────────────────────
+    方案 A: 自動修改 proposal.md
+    方案 B: 產出 revise_notes.md
+            讓 user 手動調整
+    方案 C: 互動式修改
+            (agent 提案 → user 確認)
+    需討論選哪個方案"]:::annotation
+
+    n7 --> n8
+    n8 --> n15
+    n15 -- "YES" --> n9
+    n9 --> n10
+    n15 -- "NO" --> n10
+    n10 -.-> n10b
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Phase 4: 執行 (Execution)
+    %% ═══════════════════════════════════════════════════════════════════
+
+    a4["📋 Phase 4: 執行
+    ─────────────────────
+    計畫定案後進入實作階段。
+    透過 /opsx:apply 執行開發任務，
+    中間可能呼叫 [delegate agent]
+    (DeepSeek/Codex) 來分擔實作工作。
+    🔗 整個流程由 LangGraph 串接，
+    提供 checkpointing + tracing"]:::annotation
+
+    n11["[apply agent] 透過 /opsx:apply 執行開發計畫
+    (中間可能透過開發計畫呼叫 [delegate agent])"]:::newFeature
+
+    n12{"這個 change
+    是主 change?"}:::decision
+
+    n10 --> n11
+    n11 --> n12
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Phase 5: 進度追蹤 (Progress Tracking)
+    %% ═══════════════════════════════════════════════════════════════════
+
+    a5["📋 Phase 5: 進度追蹤
+    ─────────────────────
+    每個子任務完成後更新 roadmap.md。
+    當所有子任務完成，整個開發流程結束。
+    📁 目錄結構：
+    docs/trly/{主任務}/
+    ├── roadmap.md    (總目錄+進度)
+    ├── {子任務A}.md  (詳細內容)
+    └── {子任務B}.md  (詳細內容)"]:::annotation
+
+    n16["更新 roadmap 進度
+    - 寫入執行摘要
+    - 更新子任務狀態 (✅/🔄/⏳/🔴)
+    - 若相關 openspec 檔案有更新，同步摘要"]:::newFeature
+
+    n14{"整個 roadmap
+    已經開發完成了?"}:::decision
+
+    n13["✅ Finish
+    所有階段性任務完成"]:::completed
+
+    n12 -- "YES" --> n13
+    n12 -- "NO" --> n16
+    n16 --> n14
+    n14 -- "NO" --> n7
+    n14 -- "YES" --> n13
+    n6 --> n13
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% 全局註解: 尚未實作的基礎設施
+    %% ═══════════════════════════════════════════════════════════════════
+
+    aInfra["🏗️ 需要先建立的基礎設施：
+    ─────────────────────────────
+    1. LangGraph StateGraph 框架
+       (node / edge / conditional edge / checkpoint)
+    2. Zero-Token Gateway adapter
+       (openclaw-zero-token 或 token-free-gateway)
+    3. Skill 入口 (/rtly:dev) + CLI 入口 (rtly dev)
+    4. Roadmap manager (讀寫 roadmap.md 的模組)
+    5. LangSmith / LangFuse tracing 設定"]:::annotation
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Shape definitions (Mermaid 11 @{ shape: ... } syntax)
+    %% ═══════════════════════════════════════════════════════════════════
+
+    %% --- 新功能 / 尚未實現 ---
+    n1@{ shape: rect}
+    n3@{ shape: rect}
+    n11@{ shape: rect}
+    n16@{ shape: rect}
+
+    %% --- 部分實現 / 待整合 ---
+    n7@{ shape: rect}
+    n8@{ shape: rect}
+    n9@{ shape: rect}
+
+    %% --- 待討論 ---
+    n5@{ shape: rect}
+    n10@{ shape: rect}
+
+    %% --- 邏輯判斷 (菱形) ---
+    n2@{ shape: rhombus}
+    n4@{ shape: rhombus}
+    n12@{ shape: rhombus}
+    n14@{ shape: rhombus}
+    n15@{ shape: rhombus}
+
+    %% --- 已完成 ---
+    n6@{ shape: rect}
+    n13@{ shape: stadium}
+
+    %% --- 註解節點 (stadium 形狀，藍色框) ---
+    a1@{ shape: rect}
+    a2@{ shape: rect}
+    a3@{ shape: rect}
+    a4@{ shape: rect}
+    a5@{ shape: rect}
+    aInfra@{ shape: rect}
+    n5b@{ shape: rect}
+    n10b@{ shape: rect}
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Style definitions — 依照類型標色
+    %% ═══════════════════════════════════════════════════════════════════
+
+    %% --- 🟠 新功能 (New Feature): Orange fill + dark orange border ---
+    style n1 fill:#FFF3E0,stroke:#FF6D00,stroke-width:3px,color:#E65100
+    style n3 fill:#FFF3E0,stroke:#FF6D00,stroke-width:3px,color:#E65100
+    style n11 fill:#FFF3E0,stroke:#FF6D00,stroke-width:3px,color:#E65100
+    style n16 fill:#FFF3E0,stroke:#FF6D00,stroke-width:3px,color:#E65100
+
+    %% --- 🟡 部分實現 (Partial): Amber fill + dark amber border ---
+    style n7 fill:#FFF8E1,stroke:#FFAB00,stroke-width:3px,color:#E65100
+    style n8 fill:#FFF8E1,stroke:#FFAB00,stroke-width:3px,color:#E65100
+    style n9 fill:#FFF8E1,stroke:#FFAB00,stroke-width:3px,color:#E65100
+
+    %% --- 🟣 待討論 (Needs Discussion): Purple fill + dark purple border ---
+    style n5 fill:#F3E5F5,stroke:#AB47BC,stroke-width:3px,color:#6A1B9A
+    style n10 fill:#F3E5F5,stroke:#AB47BC,stroke-width:3px,color:#6A1B9A
+
+    %% --- ⚪ 邏輯判斷 (Decision): Light grey fill + grey dashed border ---
+    style n2 fill:#FAFAFA,stroke:#9E9E9E,stroke-width:2px,stroke-dasharray:6 4,color:#616161
+    style n4 fill:#FAFAFA,stroke:#9E9E9E,stroke-width:2px,stroke-dasharray:6 4,color:#616161
+    style n12 fill:#FAFAFA,stroke:#9E9E9E,stroke-width:2px,stroke-dasharray:6 4,color:#616161
+    style n14 fill:#FAFAFA,stroke:#9E9E9E,stroke-width:2px,stroke-dasharray:6 4,color:#616161
+    style n15 fill:#FAFAFA,stroke:#9E9E9E,stroke-width:2px,stroke-dasharray:6 4,color:#616161
+
+    %% --- 🟢 已完成 (Completed): Green fill + dark green border ---
+    style n6 fill:#E8F5E9,stroke:#66BB6A,stroke-width:3px,color:#2E7D32
+    style n13 fill:#E8F5E9,stroke:#66BB6A,stroke-width:3px,color:#2E7D32
+
+    %% --- 🔵 註解/說明 (Annotation): Blue fill + blue border (dotted) ---
+    style a1 fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style a2 fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style a3 fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style a4 fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style a5 fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style aInfra fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style n5b fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+    style n10b fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
+
+    %% ═══════════════════════════════════════════════════════════════════
+    %% Class definitions (fallback for renderers that support classDef)
+    %% ═══════════════════════════════════════════════════════════════════
+    classDef newFeature fill:#FFF3E0,stroke:#FF6D00,stroke-width:3px,color:#E65100
+    classDef partialImpl fill:#FFF8E1,stroke:#FFAB00,stroke-width:3px,color:#E65100
+    classDef needsDiscussion fill:#F3E5F5,stroke:#AB47BC,stroke-width:3px,color:#6A1B9A
+    classDef decision fill:#FAFAFA,stroke:#9E9E9E,stroke-width:2px,stroke-dasharray:6 4,color:#616161
+    classDef completed fill:#E8F5E9,stroke:#66BB6A,stroke-width:3px,color:#2E7D32
+    classDef annotation fill:#E3F2FD,stroke:#42A5F5,stroke-width:2px,stroke-dasharray:3 3,color:#1565C0
