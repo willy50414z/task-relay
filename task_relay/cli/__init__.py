@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -9,6 +10,25 @@ from task_relay.cli.pack import handle_pack, handle_pack_lint, handle_pack_metri
 from task_relay.cli.run import handle_run
 from task_relay.cli.trace import handle_trace
 from task_relay.delegation import InstallResult, clear, install, parse_existing_block, resolve_install_paths, uninstall
+from task_relay.review_config import (
+    DEFAULT_GLOBAL_TIMEOUT,
+    ReviewRoleEntry,
+    default_arbiter_entries,
+    migrate_legacy_review_chain,
+    parse_role_entries,
+)
+from task_relay.review_gate import (
+    APPROVE_EXIT_CODE,
+    CONFIG_EXIT_CODE,
+    REJECT_EXIT_CODE,
+    REVISE_EXIT_CODE,
+    RUNTIME_EXIT_CODE,
+    TIMEOUT_EXIT_CODE,
+    config_from_args,
+    exit_code_for_result,
+    run_review_gate,
+    verify_revision_readiness,
+)
 from task_relay.wizard import WizardState, make_prompt_adapter, run_wizard
 
 from task_relay.packer import VALID_MODES as PACK_MODES
@@ -101,13 +121,37 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     health_parser.add_argument("--json", action="store_true", required=True)
     health_parser.set_defaults(handler=handle_health)
 
+    review_gate_parser = subparsers.add_parser("review-gate", help="Run the full proposal review gate.")
+    review_gate_parser.add_argument("--change", required=True, help="OpenSpec change name")
+    review_gate_parser.add_argument("--reviewers", help="Override reviewers: agent[:/persona][=model],...")
+    review_gate_parser.add_argument("--arbiter", action="append", default=[], help="Override arbiter entries. Repeatable or comma-separated.")
+    review_gate_parser.add_argument("--global-timeout", type=int, default=DEFAULT_GLOBAL_TIMEOUT)
+    review_gate_parser.add_argument("--cwd", help="Project root containing openspec/ (defaults to current dir)")
+    review_gate_parser.add_argument("--json", action="store_true", help="Emit structured JSON result.")
+    review_gate_parser.add_argument("--verify-revision", action="store_true", help="Verify whether a prior REVISE contract has been satisfied.")
+    review_gate_parser.add_argument("--result-path", help="Override the machine-readable review result artifact path.")
+    review_gate_parser.set_defaults(handler=handle_review_gate)
+
     install_parser = subparsers.add_parser("install", help="Install task-relay delegation guidance interactively.")
     install_group = install_parser.add_mutually_exclusive_group()
     install_group.add_argument("--primary", choices=INSTALL_TARGETS, help="Single installation target for backward compatibility")
     install_group.add_argument("--targets", type=parse_install_targets, help="Comma-separated installation targets (claude,codex)")
     install_parser.add_argument("--scope", choices=["user", "project"], help="Installation scope")
     install_parser.add_argument("--feature", help="Features to enable: review,apply or none (comma-separated)")
-    install_parser.add_argument("--review-chain", help="Review agent chain: agent=model,agent=model,...")
+    install_parser.add_argument("--reviewers", help="Parallel reviewer entries: agent[:/persona][=model],...")
+    install_parser.add_argument(
+        "--arbiter",
+        action="append",
+        default=[],
+        help="Serial arbiter entries: agent[:/persona][=model]. Repeatable or comma-separated.",
+    )
+    install_parser.add_argument(
+        "--global-timeout",
+        type=int,
+        default=DEFAULT_GLOBAL_TIMEOUT,
+        help="Global timeout in seconds for the full review gate.",
+    )
+    install_parser.add_argument("--review-chain", help="Deprecated review chain: agent=model,agent=model,...")
     install_parser.add_argument("--apply-chain", help="Apply agent chain: agent=model,agent=model,...")
     install_parser.add_argument("--mode", choices=["main", "hybrid", "delegated-apply"], help="[legacy] Delegation mode — mapped to features")
     install_parser.add_argument("--sub-agent", choices=["claude", "codex", "deepseek"], help="[legacy] Delegation sub-agent — mapped to apply chain")
@@ -224,6 +268,13 @@ def _parse_chain(value: str) -> list[tuple[str, str | None]]:
     return chain
 
 
+def _parse_repeatable_role_entries(values: list[str]) -> list[ReviewRoleEntry]:
+    entries: list[ReviewRoleEntry] = []
+    for value in values:
+        entries.extend(parse_role_entries(value))
+    return entries
+
+
 def _resolve_install_targets(args) -> list[str]:
     if args.targets:
         return list(args.targets)
@@ -261,14 +312,30 @@ def handle_install(args) -> int:
         features = ["apply"]
 
     # Determine chains: new flags take precedence, legacy --sub-agent maps to apply chain
-    review_chain: list[tuple[str, str | None]] = []
+    reviewers: list[ReviewRoleEntry] = []
+    arbiters: list[ReviewRoleEntry] = []
     apply_chain: list[tuple[str, str | None]] = []
 
+    reviewers_flag = getattr(args, "reviewers", None)
+    arbiter_flag = getattr(args, "arbiter", None) or []
     review_chain_flag = getattr(args, "review_chain", None)
     apply_chain_flag = getattr(args, "apply_chain", None)
 
-    if review_chain_flag:
-        review_chain = _parse_chain(review_chain_flag)
+    if reviewers_flag:
+        reviewers = parse_role_entries(reviewers_flag)
+    if arbiter_flag:
+        arbiters = _parse_repeatable_role_entries(arbiter_flag)
+    if review_chain_flag and reviewers_flag:
+        print("--review-chain is deprecated and cannot be combined with --reviewers", file=sys.stderr)
+        return 1
+    if review_chain_flag and not reviewers:
+        legacy_review_chain = _parse_chain(review_chain_flag)
+        if legacy_review_chain:
+            reviewers = migrate_legacy_review_chain(legacy_review_chain)
+            print(
+                "warning: --review-chain is deprecated; only the primary review entry was migrated to reviewers.",
+                file=sys.stderr,
+            )
     if apply_chain_flag:
         apply_chain = _parse_chain(apply_chain_flag)
     elif sub_agent_flag:
@@ -289,6 +356,8 @@ def handle_install(args) -> int:
             feature_flag,
             review_chain_flag,
             apply_chain_flag,
+            reviewers_flag,
+            arbiter_flag,
         )
     )
     legacy_flags_provided = any(
@@ -320,18 +389,28 @@ def handle_install(args) -> int:
                 print("No managed block found to clear.")
             return 0
 
-        if not review_chain and not apply_chain:
+        if not reviewers and not apply_chain:
             if not sub_agent_flag:
-                print("--review-chain or --apply-chain is required when features are enabled", file=sys.stderr)
+                print("--reviewers or --apply-chain is required when features are enabled", file=sys.stderr)
                 return 1
+
+        if "review" in features:
+            if not reviewers:
+                print("--reviewers is required when review is enabled", file=sys.stderr)
+                return 1
+            if not arbiters:
+                arbiters = default_arbiter_entries()
 
         results = [
             install(
                 primary_agent=target,
                 scope=args.scope,
                 features=features,
-                review_chain=review_chain,
+                reviewers=reviewers,
+                arbiters=arbiters,
                 apply_chain=apply_chain,
+                global_timeout=getattr(args, "global_timeout", DEFAULT_GLOBAL_TIMEOUT),
+                legacy_review_chain=_parse_chain(review_chain_flag) if review_chain_flag else [],
                 cwd=cwd,
             )
             for target in target_agents
@@ -354,8 +433,10 @@ def handle_install(args) -> int:
                 primary_agent=target,
                 scope=state.scope,
                 features=state.features,
-                review_chain=state.review_chain,
+                reviewers=state.reviewers,
+                arbiters=state.arbiters,
                 apply_chain=state.apply_chain,
+                global_timeout=state.global_timeout,
                 cwd=state.cwd,
             )
 
@@ -371,7 +452,7 @@ def handle_install(args) -> int:
 def _non_interactive_install_error() -> str:
     return (
         "install requires non-interactive flags when stdin is not a TTY: "
-        "--primary/--targets, --scope, --feature, and --review-chain/--apply-chain when features are enabled"
+        "--primary/--targets, --scope, --feature, and --reviewers/--apply-chain when features are enabled"
     )
 
 
@@ -401,17 +482,21 @@ def _resolve_prefill_state(target_agents: list[str], scope: str | None, cwd: Pat
         return _build_prefill_state(candidate, ordered_targets, cwd)
 
     shared_features = _shared_list_value(candidates, "features")
-    shared_review_chain = _shared_chain_value(candidates, "review_chain")
+    shared_reviewers = _shared_role_value(candidates, "reviewers")
+    shared_arbiters = _shared_role_value(candidates, "arbiters")
     shared_apply_chain = _shared_chain_value(candidates, "apply_chain")
     shared_scope = _shared_value(candidates, "scope")
+    shared_timeout = _shared_value(candidates, "global_timeout")
 
     if shared_features is not None and shared_scope:
         return WizardState(
             target_agents=ordered_targets,
             scope=shared_scope,
             features=shared_features,
-            review_chain=shared_review_chain or [],
+            reviewers=shared_reviewers or [],
+            arbiters=shared_arbiters or [],
             apply_chain=shared_apply_chain or [],
+            global_timeout=int(shared_timeout) if shared_timeout is not None else DEFAULT_GLOBAL_TIMEOUT,
             cwd=cwd,
         )
 
@@ -420,15 +505,18 @@ def _resolve_prefill_state(target_agents: list[str], scope: str | None, cwd: Pat
 
 def _build_prefill_state(candidate: dict, target_agents: list[str], cwd: Path) -> WizardState:
     features = candidate.get("features") or []
-    review_chain = candidate.get("review_chain") or []
+    reviewers = candidate.get("reviewers") or []
+    arbiters = candidate.get("arbiters") or []
     apply_chain = candidate.get("apply_chain") or []
 
     return WizardState(
         target_agents=target_agents,
         scope=candidate.get("scope"),
         features=features,
-        review_chain=review_chain,
+        reviewers=reviewers,
+        arbiters=arbiters,
         apply_chain=apply_chain,
+        global_timeout=int(candidate.get("global_timeout") or DEFAULT_GLOBAL_TIMEOUT),
         cwd=cwd,
     )
 
@@ -455,6 +543,16 @@ def _shared_chain_value(candidates: list[dict], key: str) -> list | None:
     return None
 
 
+def _shared_role_value(candidates: list[dict], key: str) -> list[ReviewRoleEntry] | None:
+    values = [
+        tuple((entry.agent, entry.persona, entry.model) for entry in (candidate.get(key) or []))
+        for candidate in candidates
+    ]
+    if len(set(values)) == 1:
+        return [ReviewRoleEntry(agent=agent, persona=persona, model=model) for agent, persona, model in values[0]]
+    return None
+
+
 def handle_uninstall(args) -> int:
     cwd = Path(args.cwd) if args.cwd else Path.cwd()
 
@@ -466,3 +564,66 @@ def handle_uninstall(args) -> int:
     for result in results:
         print(f"Removed delegation guidance: {result.guidance_path} (scope: {result.scope})")
     return 0
+
+
+def handle_review_gate(args) -> int:
+    if getattr(args, "verify_revision", False):
+        try:
+            payload = verify_revision_readiness(args.change, cwd=args.cwd, result_path=getattr(args, "result_path", None))
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return RUNTIME_EXIT_CODE
+        if getattr(args, "json", False):
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        else:
+            sys.stdout.write(f"{payload['decision']}\n")
+            sys.stdout.write(f"apply_ready: {str(payload['apply_ready']).lower()}\n")
+            if payload.get("pending_targets"):
+                sys.stdout.write("pending_targets:\n")
+                for item in payload["pending_targets"]:
+                    sys.stdout.write(f"- {item}\n")
+        if payload["decision"] == "REJECT":
+            return REJECT_EXIT_CODE
+        if payload["decision"] == "REVISE" and not payload["apply_ready"]:
+            return REVISE_EXIT_CODE
+        return APPROVE_EXIT_CODE
+
+    try:
+        config = config_from_args(args)
+        result = run_review_gate(args.change, cwd=args.cwd, config=config)
+    except TimeoutError:
+        return TIMEOUT_EXIT_CODE
+    except Exception as exc:
+        from task_relay.errors import ReviewGateConfigError, ReviewGateTimeoutError
+
+        print(str(exc), file=sys.stderr)
+        if isinstance(exc, ReviewGateConfigError):
+            return CONFIG_EXIT_CODE
+        if isinstance(exc, ReviewGateTimeoutError):
+            return TIMEOUT_EXIT_CODE
+        return RUNTIME_EXIT_CODE
+
+    if getattr(args, "json", False):
+        payload = {
+            "decision": result.decision,
+            "summary_path": str(result.summary_path),
+            "result_path": str(result.result_path),
+            "apply_allowed": result.decision != "REJECT",
+            "requires_primary_revision": result.decision == "REVISE",
+            "reviewers": [str(item.path) for item in result.reviewer_artifacts],
+            "arbiters": [str(item.path) for item in result.arbiter_artifacts],
+        }
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    else:
+        sys.stdout.write(f"{result.decision}\n")
+        sys.stdout.write(f"summary: {result.summary_path}\n")
+        sys.stdout.write(f"result: {result.result_path}\n")
+        if result.decision == "REVISE":
+            sys.stdout.write("apply_allowed_after_primary_revision: true\n")
+            for arbiter in result.arbiter_artifacts:
+                for item in arbiter.payload.get("actionable_items", []):
+                    sys.stdout.write(
+                        f"- {item.get('target_artifact')}: {item.get('required_change')} "
+                        f"(acceptance: {item.get('acceptance_criteria')})\n"
+                    )
+    return exit_code_for_result(result)

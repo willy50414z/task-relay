@@ -21,6 +21,7 @@ from task_relay.errors import PacketGenerationError
 SKILL_NAME = "task-relay-delegation"
 VALID_MODES = (
     "review-proposal",
+    "review-arbiter",
     "implementation-draft",
     "test-draft",
     "review",

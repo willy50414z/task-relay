@@ -1,82 +1,98 @@
-# Delegation Review — `enhance-context-packer` 提案審查
+# Delegation Review — `add-parallel-review-arbiter` 提案審查
 
 - 模式：`review-proposal`
 - 審查目標：需求清晰度、方向正確性、實作計畫完整度（客觀視角）
-- 審查範圍：`proposal.md` / `design.md` / `tasks.md` + 既有實作 `task_relay/packer.py`、`task_relay/trace.py`、baseline `harden-delegation-runtime`
-- 結論摘要：**方向合理、可批准進入實作，但需先收斂數個會卡住 P0/P1/P3 的開放問題與兩處方向性張力。** 沒有發現 blocker，但有數個 major 需在動工前澄清。
+- 審查範圍：`proposal.md` / `design.md` / `tasks.md` / `specs/parallel-review-arbitration/spec.md` + 既有實作（`task_relay/cli/__init__.py`、`core.py`、`delegation.py`、`wizard.py`、`packer.py`、現有 review-proposal 模板）
+- 結論摘要：**方向合理、值得做，可在收斂下列 major 後進入實作。沒有發現會否決方向的 blocker，但有 4 個 major（其中「無 arbiter 時決策來源」與「reviewer 失敗策略」若不先定義會在核心 contract 留下未定義行為）需動工前澄清。** 多處 Impact / flag 與既有程式碼對不上，需更正以免實作者找錯檔案。
 
 ---
 
 ## 整體評價（正面）
 
-- **P0 先行（measurement-gates-work）的排序是正確且有紀律的**，沿用 observability「沒有量測就沒有宣稱」的原則，避免後續 P1–P3 自說自話。
-- **方向與來源文件一致**：`context-packer-enhance.md` 的五點建議被忠實拆成 P0–P3，且保留「模型只做受限 scope resolver、不產生最終 packet」的核心約束。
-- **依賴宣告正確**：已確認 `openspec/specs/` 為空（提案宣稱「無 base spec 可改」屬實），baseline 的 `delegation-observability` 能力確實存在，DeepSeek 透過 claude CLI `--output-format json` 執行（`agents/deepseek.py:41`），`trace.py` 已能彙整 token/cost，因此 P3「以 observability trace 量測 resolver 成本」在技術上可行。
-- **point-to 預設（D3）方向正確**：delegate 跑在含完整 repo 的 worktree，預設引用而非 inline 可避免重蹈 C4 修掉的 packet 膨脹。
+- **核心動機成立**：現有 review path 確實只有單一 `review_chain`（`delegation.py:162` 起），語義是「primary reviewer 先跑、fallback」，且只驗證單一 `spec/delegation_review.md` 是否非空（`core.py:119 verify_expected_output`）。提案指出的「無法平行取得多觀點、單一輸出檔不利平行寫入、缺獨立仲裁節點」三點，與既有碼一致，問題描述屬實。
+- **邊界拆分正確**：Decision 1 不重用 `run(targets=[...])` 而新增 review gate API 是對的——`--targets` 在現碼確實是 ordered fallback（`add_target_args` help 字面寫 "ordered fallback"，`core._run_with_fallback`），若疊上 parallel 會讓同一旗標兩義。
+- **JSON 為流程 contract、Markdown 為人類摘要（Decision 4）方向正確**，且「決策邏輯寫在 CLI 而非 arbiter prompt（Decision 5）」符合既有「不信任 stdout、以 artifact 驗證」的設計哲學。
+- **Non-goals 清楚**：明確不改 apply-chain fallback、不讓 arbiter 改文件、不建完整 outcome-resolution engine，範圍收斂得當。
 
 ---
 
 ## Findings
 
-### [major] F1 — P3 cross-check 規則可能抵銷模型本身的價值
-- **問題描述**：design D4 / spec `packer-model-resolution` 規定模型結果要「cross-check against the token-overlap top candidates」才接受，且「untrustworthy → 退回保守 all-specs」。但若驗收規則是「模型選擇必須落在 deterministic top candidates 內」，那麼在 deterministic 本來就無法唯一決定（正是觸發模型的前提）的情境下，模型只能在 deterministic 已並列的候選中二選一；一旦模型選了 deterministic 排名外但實際正確的 spec，反而會被拒絕。換言之 cross-check 可能讓模型「只能確認、無法補正」，使 P3 的淨價值趨近於零。
-- **影響範圍**：P3 全部（tasks 4.2–4.4、spec「Cross-check against deterministic candidates」場景），直接決定 P3 是否值得做。
-- **建議方向**：明確定義 cross-check 是「硬性過濾（must be in top-N）」還是「軟性加權 / 平手裁決」。建議改為：模型可從**完整候選集合**（而非僅 deterministic top-N）中選，cross-check 僅用於偵測明顯離群（例如選了 token overlap 為 0 的 spec 才拒絕），保留模型補正空間。請使用者裁示驗收語意。
+### [major] 無 arbiter 設定時，最終決策無來源
+- **問題描述**：最終 gate 決策（spec「Programmatic gate decision」、Decision 3 聚合規則）**只**從 arbiter JSON 的 `decision` 欄位推導。但 `--arbiter` 是新增設定，未說明是否為必填。若使用者只設 `--reviewers` 而未設 `--arbiter`（或 arbiter chain 為空），gate 沒有任何 `decision` 來源，APPROVE/REVISE/REJECT 三態皆無法產生。
+- **影響範圍**：核心 contract（`run_review_gate` 回傳值）、CLI exit code、DAG gate 解鎖條件；task 1.1（config 模型）、4.3（聚合）、5.2（gate node）。
+- **建議方向（請使用者裁示）**：擇一並寫入 spec — (a) arbiter 為必填，空 arbiter 直接 named failure；或 (b) 定義「無 arbiter」的退化策略（例如以 reviewer verdict 聚合）。建議 (a) 較單純且符合 Decision 4 的嚴格性，但會改變部分使用者的最小設定習慣，故交由使用者決定。
 
-### [major] F2 — 「target fallback-rate ceiling」把量測指標與強制機制混為一談
-- **問題描述**：proposal/design 多次稱「a target fallback rate bounds how often the model fires」，task 4.5 要求「enforce a target fallback-rate ceiling」。但 fallback rate 是**輸入（artifact 品質）決定的觀測量**，不是可由程式直接「enforce」的旋鈕——你無法在不改 artifact 的前提下強制 deterministic 少失敗。task 4.5 的「enforce」缺乏可操作定義（是超標就報警？是禁止模型在超過比例時被呼叫？是 CI gate？）。
-- **影響範圍**：task 4.5、P3 驗收標準、close-out 5.1。
-- **建議方向**：拆成兩件事——(a) fallback rate 作為 P0 指標**監測並回報**；(b) 若要對模型呼叫頻率設上限，需另定義具體 enforcement（例如「單次 apply session 內 model resolver 呼叫數上限」或「超過比例時 dry-run 標記 warning 但不阻擋」）。請使用者選定語意。
+### [major] `--review-chain` 自動轉成 `--reviewers` 會靜默改變執行語義
+- **問題描述**：Decision 6 / Risks 提出「沒有 `--reviewers` 時把 `--review-chain` 轉成 reviewer list」。但 review-chain 在現碼是**有序 fallback**（只有 `review_chain[0]` 是 primary，其餘為備援，正常情況只跑一個）；轉成 reviewer list 後會變成**全部平行 fan-out 同時執行**。對一個原意是「3 選 1 fallback」的 3-agent chain，遷移後變成 3 個都跑，成本約 3 倍且行為語義不同。
+- **影響範圍**：`delegation.py`、`wizard.py` 既有 review-chain 解析；既有安裝者的成本與 review 行為；task 1.3、6.1。
+- **建議方向**：不要靜默等價轉換。建議僅取 `review_chain[0]`（原 primary）轉為單一 reviewer，或只發 deprecation warning 並要求顯式改用 `--reviewers`，避免把 fallback 數量誤當平行度。最終策略請使用者決定。
 
-### [major] F3 — 顯式訊號落點（OQ2）未決，卻是 ecosystem 級慣例變更
-- **問題描述**：design Open Question 2（訊號放 `tasks.md` inline vs sidecar、`openspec validate` 如何對待）被 task 2.1 直接延後到實作期決定。但這是會影響所有 OpenSpec 作者的**撰寫慣例變更**（proposal「Impact」自承為 ecosystem-level convention change），落點選擇會反向決定 packer 的解析實作、pack-lint 的驗證面、以及與 `openspec validate` 的整合方式。在此未決前，P1 的 2.2/2.4 難以給出穩定設計。
-- **影響範圍**：P1 全部（2.1–2.5）、pack-lint 介面、與既有 OpenSpec 工具鏈的相容性。
-- **建議方向**：在動工 P1 前先收斂落點。建議優先評估 sidecar（例如 `packer.yml` / `signals.md`）以免污染人類可讀的 `tasks.md` 並避開 `openspec validate` schema 衝突，但此屬慣例決策，**應由使用者裁定**而非實作者自行決定。
+### [major] reviewer 失敗 / invalid JSON / 部分缺漏的 gate 策略未定義
+- **問題描述**：spec 只定義了 timeout 要 fail loudly，以及「缺漏或格式錯誤是 infrastructure failure」。但未定義**單一 reviewer**失敗時整個 gate 的行為：是 fail-all（任一 reviewer 壞掉就整個 gate fail），還是 proceed-with-available（用已成功的 reviewer 報告餵給 arbiter）？平行 fan-out 中單一 agent flaky 是常見情況，這會直接決定 gate 的健壯度。
+- **影響範圍**：`run_parallel_review` 回傳契約、arbiter packet 組裝（缺報告時 arbiter 看到什麼）；task 3.1、3.4、4.1、6.5。
+- **建議方向**：明確寫出 reviewer 失敗政策與「arbiter 至少需要幾份有效 reviewer 報告才可裁決」。建議預設 fail-loudly 但允許設定「最低成功 reviewer 數」門檻；請使用者裁示嚴格度。
 
-### [major] F4 — 評估集的客觀性與循環性風險未處理
-- **問題描述**：P0 的可信度完全建立在 labeled eval set 上，但 task 1.2 僅說「start with the existing changes' tasks」。由同一群人、針對自家既有 change 標註「expected scope」，且標註者與選擇規則設計者重疊時，存在**過擬合 / 循環論證**風險：指標可能只是反映規則作者的直覺，而非客觀準確率。design 也未說明 ground-truth「expected scope」由誰、依何準則標註，以及樣本量是否足以支撐 precision/recall 宣稱。
-- **影響範圍**：P0（1.1–1.4）、以及所有「P1–P3 提升準確率」宣稱（close-out 5.1）的可信度。
-- **建議方向**：明確定義 (a) 誰標註 ground-truth、依據什麼準則；(b) 最小樣本量與多樣性要求；(c) 是否需與規則設計者分離以避免循環。至少在 design 補一段標註方法論。
+### [major] Impact 檔案清單與既有結構不符，會誤導實作
+- **問題描述**：Impact 與 tasks 多處引用 `task_relay/assets/task-relay-delegation/SKILL.md`，但該檔在來源樹**不存在**（`task-relay-delegation/` 下只有 `agents/` 與 `templates/`）。managed guidance 實際是由 `delegation.py` 以程式動態產生（`_features_policy` 等），寫進 `AGENTS.md` / `CLAUDE.md` 的 managed block（`MANAGED_BLOCK_START`）。因此「更新 SKILL.md」其實是「改 `delegation.py` 的 policy 生成函式」。
+- **影響範圍**：task 1.5、2.x 的落點；實作者依 Impact 會找不到檔案。
+- **建議方向**：更正 Impact／tasks，把「managed AGENTS/SKILL guidance」對應到 `delegation.py` 的 policy 生成，而非不存在的 SKILL.md 資產。（提醒：此為審查意見，請由 Primary 決定是否修訂提案，本審查不直接改文件。）
 
-### [minor] F5 — 指標的「section 級」precision/recall 標註主觀性高
-- **問題描述**：指標要求計算「selected specs **and sections**」的 precision/recall。spec 與 task block 的相關性相對客觀，但「哪些 `design.md` section 算相關」高度主觀，難以產生穩定 ground-truth，會讓 section 級指標噪音大。
-- **影響範圍**：task 1.1、1.5。
-- **建議方向**：考慮先以 spec/task-block 級指標為主指標，section 級降為輔助觀測或先不納入準確率分數；或明確定義 section 相關性的標註規則。
+### [minor] `--global-timeout` 有實作任務但無設定入口
+- **問題描述**：Risks 與 task 3.4 都提到 global timeout，但 What Changes 與 task 1.2 的 install flag 清單（`--reviewers`、`--arbiter`）未包含它，現碼亦無 `global-timeout`（grep 無結果）。設定來源未定（install flag？gate command flag？config 模型預設值？）。
+- **影響範圍**：task 1.1、1.2、3.4；CLI 介面一致性。
+- **建議方向**：在 config 模型與 CLI flag 明確定義 timeout 的設定路徑與預設值。
 
-### [minor] F6 — cache key `(task, artifact-hash)` 的 artifact 範圍未界定
-- **問題描述**：P3 以 `(task, artifact-hash)` 快取以求可重現，但「artifact-hash」涵蓋哪些檔案未定義。若僅含 OpenSpec artifact，而 P2 的動態 change-branch diff（repo 檔案）變動時，repo-file 候選會與快取不一致而 stale。
-- **影響範圍**：task 4.4，與 P2（3.3 動態 diff scope）的交互。
-- **建議方向**：明確列出 hash 涵蓋集合；若 resolver 結果含 repo-file 候選，hash 應納入相關 repo 檔案 / diff 指紋。
+### [minor] reviewer `verdict` 與 arbiter `confidence` 蒐集但未使用
+- **問題描述**：reviewer JSON 的 `verdict`（PASS/CONCERNS/BLOCKED）與 arbiter JSON 的 `confidence` 在最終聚合（Decision 3 只用 arbiter `decision`）中沒有任何作用。reviewer BLOCKED 不會擋 gate，只有 arbiter REJECT 會。
+- **影響範圍**：schema 設計、task 4.1/4.2；使用者對「BLOCKED 卻 APPROVE」的預期落差。
+- **建議方向**：要嘛定義這些欄位的實際用途（例如 confidence 低於門檻時降級為 REVISE），要嘛標為 advisory/optional 並在模板註明不影響決策。
 
-### [minor] F7 — pack-lint 的執行點與「是否 gating」未定義
-- **問題描述**：pack-lint 定位為「post-propose 診斷檢查」，task 2.4 說「CLI + module」，但未定義它在委派流程中的觸發點（獨立 `trly pack-lint`？併入某既有指令？），以及它是純諮詢還是會在委派前阻擋。spec 已明確「diagnostic only、不改 artifact」，但「不阻擋委派」與「diagnostic only」不是同一件事，建議分清。
-- **影響範圍**：task 2.4、與委派主流程（`delegation.py` managed-block workflow）的銜接。
-- **建議方向**：在 design 補一句 pack-lint 的呼叫點與 advisory/gating 定位。
+### [minor] reviewer 唯一 id / 輸出檔命名規則未定死，存在碰撞缺口
+- **問題描述**：spec 的 isolation 範例用 persona slug 命名（`delegation_review_review.json`、`_cso.json`、`_qa-only.json`），且「same agent 多次」場景靠不同 persona 區分。但**相同 persona、不同 agent**（如 `claude:/review` 與 `deepseek:/review`）在純 persona-slug 命名下會碰撞到同一檔。Risk 雖提到「必要時加序號」，但唯一 id 推導規則未在 spec 釘死。
+- **影響範圍**：task 3.3、6.3；artifact isolation 正確性。
+- **建議方向**：在 spec 明確定義 id 由 agent + persona（必要時序號）組成，並補一個「不同 agent 相同 persona」的 scenario。
 
-### [minor] F8 — 動態 test-mode scope 與 baseline worktree/change-branch 模型的依賴未顯式化
-- **問題描述**：P2 的「change-branch diff」直接依賴 baseline `harden-delegation-runtime` 的 task 7（change-level integration worktree、`tr/<task-id>` / `chg/<change>` 分支模型）。design Open Question 4（diff 由 `--base` 參數傳入 vs 讀取 active change branch）未決，且未說明如何取得「本次 apply session 在 change branch 上產生的 diff」。
-- **影響範圍**：task 3.3、與 baseline task 7 的耦合。
-- **建議方向**：在 design 明確指出依賴 baseline 的哪個分支模型來界定「change-branch diff」，並先收斂 OQ4 的取得方式。
+### [minor] 並行機制與既有同步架構的落差未說明
+- **問題描述**：design 說用 `asyncio.gather()` 啟動多個 `trly run` 子行程，但整個 codebase 無任何 async（grep `asyncio/async def/await` 皆無），`core.run` 是同步函式。到底是 asyncio 子行程、threadpool 包同步 `run`、還是 shell 出去呼叫 `trly` CLI，未指定；這會影響 trace/session 記錄、cwd 與 worktree 隔離行為。
+- **影響範圍**：task 3.1、3.2；`trace.py` session 記錄、`core.run` 重用與否。
+- **建議方向**：在 design 釘住並行實作策略（建議 threadpool 包既有同步 `core.run` 以重用 trace/verify 路徑，或明確改走 subprocess 並說明 trace 如何彙整）。
 
-### [minor] F9 — baseline 尚未 archive，前置條件需實際驗證
-- **問題描述**：`harden-delegation-runtime` 仍在 `openspec/changes/`（無 `archive/`），其 tasks 仍有 8.6a、8.8 未勾選（雖標示為 deferred / 另案）。實作所依賴的 `packer.py`、`trace.py` 已存在於工作樹，故依賴**實質可滿足**，但 task 0.1 的「confirm harden has landed」應落實為明確驗證（依賴的是 C4 packer + observability trace，而非 8.6a/8.8）。
-- **影響範圍**：prerequisite 0.1。
-- **建議方向**：把 0.1 的「landed」明確界定為「C4（4.x）+ observability（8.1–8.7）已完成」，與 deferred 項目脫鉤。
+### [minor] 既有 review-proposal 模板與新 reviewer JSON schema 詞彙不一致
+- **問題描述**：現有 `templates/review-proposal.md` 要求 reviewer 輸出 Markdown，severity 用 `blocker/major/minor/suggestion`，輸出到單一 `spec/delegation_review.md`。新 reviewer schema 改用 `verdict: PASS/CONCERNS/BLOCKED` + `findings[].severity: critical/high/medium/low` + 唯一 JSON 路徑。task 2.3 雖要重寫，但需注意三套詞彙（reviewer severity、reviewer verdict、arbiter decision）並存易混淆。
+- **影響範圍**：task 2.1/2.2/2.3；模板一致性與 schema 驗證。
+- **建議方向**：統一並文件化 severity / verdict / decision 三組 enum 的關係，避免 reviewer 與 arbiter 詞彙互相污染。
+
+### [suggestion] gate command 名稱與 exit code 表未列舉
+- **問題描述**：task 5.1「新增或擴充 CLI command」未指定指令名（`trly review-gate`？）與各決策對應的穩定 exit code。Primary 程式化決策依賴穩定 exit code，但 spec 未列舉碼表。
+- **建議方向**：補一張 decision → exit code 對照（APPROVE/REVISE/REJECT/infra-failure/timeout 各自的碼），並固定指令名。
+
+### [suggestion]「DAG gate / Apply Wave」屬概念模型，易被誤讀為要建排程器
+- **問題描述**：proposal/design 反覆用「DAG apply gate」「Apply Wave」「gate node」，但 codebase 並無 scheduler/wave 引擎；review/apply workflow 目前僅是 `delegation.py` 產生的 managed guidance 文字 + `--isolate` worktree 機制。Non-goal 已說不建 outcome-resolution engine，但用詞仍可能讓實作者以為要做 orchestrator。
+- **建議方向**：在 design 註明 gate 實際以「CLI exit code + managed guidance + Primary 程式化判讀」實現，非新增排程引擎，與 Non-goal 對齊。
+
+### [suggestion] persona 來源為外部 gstack skills，存在 snapshot drift
+- **問題描述**：reviewer/arbiter persona 由 gstack 的 `/review`、`/cso`、`/qa-only`、`/plan-ceo-review`、`/plan-eng-review` 萃取。萃取為靜態模板後，gstack 更新時模板會 drift；且假設 delegate agent 能在無 gstack 環境下依模板扮演該角色。
+- **建議方向**：記錄萃取來源與版本，並定義模板更新策略（或在模板註明來源 commit）。
+
+### [suggestion] REVISE 後的重送審範圍未定義
+- **問題描述**：Open Question 已合理決定「第一版不自動重跑」。但未定義 Primary 改完文件後重跑 gate 時，是否需重跑**全部** reviewer + arbiter，或可只重跑受影響者。同時缺少防無限 REVISE 迴圈的上限。
+- **建議方向**：在 spec 補「REVISE 重送審需全量重跑」與（可選）最大 revision 輪數，避免迴圈。
 
 ---
 
 ## 待使用者裁示的問題（不自行決定）
 
-1. **F1**：P3 cross-check 是硬性過濾還是軟性裁決？這決定 P3 是否具備淨價值。
-2. **F2**：fallback-rate「enforce」的具體語意（報警 / 阻擋 / 呼叫上限）？
-3. **F3**：顯式訊號落點（inline vs sidecar）——屬撰寫慣例決策。
-4. **F4**：eval set 的 ground-truth 標註方法與是否需與規則設計者分離。
-
-## 建議的先決順序（不修改 tasks.md，僅建議）
-
-- 動工前先回答 F3、F4（影響 P0/P1 的可驗證性與慣例面），再開 P0。
-- F1、F2 可在進入 P3 前收斂，不阻擋 P0–P2。
+1. `--arbiter` 是否必填？無 arbiter 時 gate 決策來源為何？（對應 major #1）
+2. `--review-chain` 遷移：取 primary 單一 reviewer、全量平行、或僅警告不轉換？（對應 major #2）
+3. reviewer 部分失敗策略：fail-all 還是 proceed-with-available？arbiter 最低有效 reviewer 數門檻？（對應 major #3）
+4. `verdict` / `confidence` 是否要進入決策邏輯，或維持純 advisory？（對應 minor）
+5. 並行實作走 threadpool（重用同步 `core.run`）還是 subprocess？（對應 minor）
 
 ---
 
-> 本報告僅為診斷輸出，未修改 `proposal.md` / `design.md` / `tasks.md`、未變更 OpenSpec 狀態、未勾選任何 checkbox。
+## 建議的先決順序（僅建議，不修改 tasks.md）
+
+1. 先收斂 major #1（無 arbiter 決策來源）與 major #3（reviewer 失敗策略）——這兩者定義 gate 核心 contract，會影響 task 1.1/3.x/4.3 的型別與回傳值。
+2. 再更正 major #4（Impact/SKILL.md 落點）——避免實作者一開始就找錯檔。
+3. 接著定 major #2（遷移語義）與 `--global-timeout` 設定入口，再進入 persona 模板與 runner 實作。

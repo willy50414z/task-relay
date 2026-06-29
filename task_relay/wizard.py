@@ -6,6 +6,13 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from task_relay.models import get_catalog, get_default_model
+from task_relay.review_config import (
+    DEFAULT_GLOBAL_TIMEOUT,
+    DEFAULT_REVIEWER_PERSONA,
+    ReviewRoleEntry,
+    default_arbiter_entries,
+    format_role_entries,
+)
 
 VALID_TARGET_AGENTS = ("claude", "codex")
 VALID_SCOPES = ("user", "project")
@@ -25,8 +32,10 @@ class WizardState:
     target_agents: list[str] = field(default_factory=list)
     scope: str | None = None
     features: list[str] = field(default_factory=list)
-    review_chain: list[tuple[str, str | None]] = field(default_factory=list)
+    reviewers: list[ReviewRoleEntry] = field(default_factory=list)
+    arbiters: list[ReviewRoleEntry] = field(default_factory=list)
     apply_chain: list[tuple[str, str | None]] = field(default_factory=list)
+    global_timeout: int = DEFAULT_GLOBAL_TIMEOUT
     cwd: Path = field(default_factory=Path.cwd)
 
 
@@ -136,8 +145,10 @@ def prompt_target_agents(state: WizardState, prompt: PromptAdapter) -> WizardSta
         target_agents=selected,
         scope=state.scope,
         features=list(state.features),
-        review_chain=list(state.review_chain),
+        reviewers=list(state.reviewers),
+        arbiters=list(state.arbiters),
         apply_chain=list(state.apply_chain),
+        global_timeout=state.global_timeout,
         cwd=state.cwd,
     )
 
@@ -150,8 +161,10 @@ def prompt_scope(state: WizardState, prompt: PromptAdapter) -> WizardState:
         target_agents=list(state.target_agents),
         scope=choice,
         features=list(state.features),
-        review_chain=list(state.review_chain),
+        reviewers=list(state.reviewers),
+        arbiters=list(state.arbiters),
         apply_chain=list(state.apply_chain),
+        global_timeout=state.global_timeout,
         cwd=state.cwd,
     )
 
@@ -170,8 +183,10 @@ def prompt_features(state: WizardState, prompt: PromptAdapter) -> WizardState:
         target_agents=list(state.target_agents),
         scope=state.scope,
         features=selected,
-        review_chain=list(state.review_chain),
+        reviewers=list(state.reviewers),
+        arbiters=list(state.arbiters),
         apply_chain=list(state.apply_chain),
+        global_timeout=state.global_timeout,
         cwd=state.cwd,
     )
 
@@ -181,28 +196,39 @@ def _chain_agents(chain: list[tuple[str, str | None]]) -> list[str]:
     return [agent for agent, _model in chain]
 
 
-def prompt_chain_primary(state: WizardState, chain_name: str, prompt: PromptAdapter) -> WizardState:
-    options = list(VALID_AGENTS)
-    label = "Review" if chain_name == "review" else "Apply"
-    choice = prompt.select(f"Select primary {label} agent:", _choices(options))
-    chain = [(choice, None)]
-    if chain_name == "review":
-        return WizardState(
-            target_agents=list(state.target_agents),
-            scope=state.scope,
-            features=list(state.features),
-            review_chain=chain,
-            apply_chain=list(state.apply_chain),
-            cwd=state.cwd,
-        )
+def prompt_reviewer_primary(state: WizardState, prompt: PromptAdapter) -> WizardState:
+    choice = prompt.select("Select primary reviewer agent:", _choices(list(VALID_AGENTS)))
+    reviewers = [ReviewRoleEntry(agent=choice, persona=DEFAULT_REVIEWER_PERSONA)]
     return WizardState(
         target_agents=list(state.target_agents),
         scope=state.scope,
         features=list(state.features),
-        review_chain=list(state.review_chain),
-        apply_chain=chain,
+        reviewers=reviewers,
+        arbiters=list(state.arbiters),
+        apply_chain=list(state.apply_chain),
+        global_timeout=state.global_timeout,
         cwd=state.cwd,
     )
+
+
+def prompt_apply_primary(state: WizardState, prompt: PromptAdapter) -> WizardState:
+    choice = prompt.select("Select primary Apply agent:", _choices(list(VALID_AGENTS)))
+    return WizardState(
+        target_agents=list(state.target_agents),
+        scope=state.scope,
+        features=list(state.features),
+        reviewers=list(state.reviewers),
+        arbiters=list(state.arbiters),
+        apply_chain=[(choice, None)],
+        global_timeout=state.global_timeout,
+        cwd=state.cwd,
+    )
+
+
+def prompt_chain_primary(state: WizardState, chain_name: str, prompt: PromptAdapter) -> WizardState:
+    if chain_name == "review":
+        return prompt_reviewer_primary(state, prompt)
+    return prompt_apply_primary(state, prompt)
 
 
 def prompt_chain_model(
@@ -218,19 +244,36 @@ def prompt_chain_model(
         )
         for model in catalog
     ]
-    label = "Review" if chain_name == "review" else "Apply"
+    label = "Reviewer" if chain_name == "review" else "Apply"
     choice = prompt.select(
         f"Select model for {label} agent ({agent}):",
         choices,
         default=default_id,
     )
+    if chain_name == "review":
+        updated_reviewers = [
+            ReviewRoleEntry(agent=entry.agent, persona=entry.persona, model=choice if entry.agent == agent else entry.model)
+            for entry in state.reviewers
+        ]
+        return WizardState(
+            target_agents=list(state.target_agents),
+            scope=state.scope,
+            features=list(state.features),
+            reviewers=updated_reviewers,
+            arbiters=list(state.arbiters),
+            apply_chain=list(state.apply_chain),
+            global_timeout=state.global_timeout,
+            cwd=state.cwd,
+        )
     chain = _get_chain(state, chain_name)
     updated_chain = [(a, choice if a == agent else m) for a, m in chain]
     return _set_chain(state, chain_name, updated_chain)
 
 
 def _get_chain(state: WizardState, chain_name: str) -> list[tuple[str, str | None]]:
-    return state.review_chain if chain_name == "review" else state.apply_chain
+    if chain_name == "review":
+        return [(entry.agent, entry.model) for entry in state.reviewers]
+    return state.apply_chain
 
 
 def _set_chain(state: WizardState, chain_name: str, chain: list[tuple[str, str | None]]) -> WizardState:
@@ -239,16 +282,20 @@ def _set_chain(state: WizardState, chain_name: str, chain: list[tuple[str, str |
             target_agents=list(state.target_agents),
             scope=state.scope,
             features=list(state.features),
-            review_chain=chain,
+            reviewers=[ReviewRoleEntry(agent=agent, persona=DEFAULT_REVIEWER_PERSONA, model=model) for agent, model in chain],
+            arbiters=list(state.arbiters),
             apply_chain=list(state.apply_chain),
+            global_timeout=state.global_timeout,
             cwd=state.cwd,
         )
     return WizardState(
         target_agents=list(state.target_agents),
         scope=state.scope,
         features=list(state.features),
-        review_chain=list(state.review_chain),
+        reviewers=list(state.reviewers),
+        arbiters=list(state.arbiters),
         apply_chain=chain,
+        global_timeout=state.global_timeout,
         cwd=state.cwd,
     )
 
@@ -268,9 +315,7 @@ def prompt_chain_fallback_loop(
         if not available:
             break
 
-        chain_display = " → ".join(
-            f"{a} ({m or 'default'})" for a, m in chain
-        )
+        chain_display = " → ".join(f"{a} ({m or 'default'})" for a, m in chain)
         print(f"\n  Current {label} chain: {chain_display}")
 
         if not prompt.confirm(f"Add fallback agent to {label} chain?", default=False):
@@ -296,6 +341,31 @@ def prompt_chain_fallback_loop(
     return current
 
 
+def prompt_default_arbiters(state: WizardState, prompt: PromptAdapter) -> WizardState:
+    arbiters = default_arbiter_entries()
+    if prompt.confirm("Use default serial arbiters (CEO then engineering)?", default=True):
+        return WizardState(
+            target_agents=list(state.target_agents),
+            scope=state.scope,
+            features=list(state.features),
+            reviewers=list(state.reviewers),
+            arbiters=arbiters,
+            apply_chain=list(state.apply_chain),
+            global_timeout=state.global_timeout,
+            cwd=state.cwd,
+        )
+    return WizardState(
+        target_agents=list(state.target_agents),
+        scope=state.scope,
+        features=list(state.features),
+        reviewers=list(state.reviewers),
+        arbiters=list(state.arbiters),
+        apply_chain=list(state.apply_chain),
+        global_timeout=state.global_timeout,
+        cwd=state.cwd,
+    )
+
+
 def confirm_and_write(
     state: WizardState,
     write_fn: Callable[[WizardState], None],
@@ -308,10 +378,9 @@ def confirm_and_write(
     features_display = ", ".join(state.features) if state.features else "(none — no delegation)"
     print(f"  Features      : {features_display}")
     if "review" in state.features:
-        chain_display = " → ".join(
-            f"{a} ({m or 'default'})" for a, m in state.review_chain
-        )
-        print(f"  Review chain  : {chain_display}")
+        print(f"  Reviewers     : {format_role_entries(state.reviewers)}")
+        print(f"  Arbiter chain : {format_role_entries(state.arbiters)}")
+        print(f"  Global timeout: {state.global_timeout}s")
     if "apply" in state.features:
         chain_display = " → ".join(
             f"{a} ({m or 'default'})" for a, m in state.apply_chain
@@ -341,8 +410,10 @@ def run_wizard(
         state.target_agents = list(prefill_state.target_agents)
         state.scope = prefill_state.scope
         state.features = list(prefill_state.features)
-        state.review_chain = list(prefill_state.review_chain)
+        state.reviewers = list(prefill_state.reviewers)
+        state.arbiters = list(prefill_state.arbiters)
         state.apply_chain = list(prefill_state.apply_chain)
+        state.global_timeout = prefill_state.global_timeout
 
     try:
         state = prompt_target_agents(state, prompt)
@@ -355,13 +426,14 @@ def run_wizard(
             return 0
 
         if "review" in state.features:
-            state = prompt_chain_primary(state, "review", prompt)
-            review_primary = state.review_chain[0][0]
+            state = prompt_reviewer_primary(state, prompt)
+            review_primary = state.reviewers[0].agent
             state = prompt_chain_model(state, "review", review_primary, prompt)
+            state = prompt_default_arbiters(state, prompt)
             state = prompt_chain_fallback_loop(state, "review", prompt)
 
         if "apply" in state.features:
-            state = prompt_chain_primary(state, "apply", prompt)
+            state = prompt_apply_primary(state, prompt)
             apply_primary = state.apply_chain[0][0]
             state = prompt_chain_model(state, "apply", apply_primary, prompt)
             state = prompt_chain_fallback_loop(state, "apply", prompt)
@@ -395,8 +467,12 @@ def prefill_from_existing(path: Path, state: WizardState | None = None) -> Wizar
         # Legacy: hybrid or delegated-apply → apply feature
         state.features = ["apply"]
 
-    if parsed.get("review_chain"):
-        state.review_chain = parsed["review_chain"]
+    if parsed.get("reviewers"):
+        state.reviewers = parsed["reviewers"]
+    elif parsed.get("review_chain"):
+        state.reviewers = [ReviewRoleEntry(agent=agent, persona=DEFAULT_REVIEWER_PERSONA, model=model) for agent, model in parsed["review_chain"][:1]]
+    if parsed.get("arbiters"):
+        state.arbiters = parsed["arbiters"]
     if parsed.get("apply_chain"):
         state.apply_chain = parsed["apply_chain"]
     elif parsed.get("sub_agent"):
@@ -412,6 +488,8 @@ def prefill_from_existing(path: Path, state: WizardState | None = None) -> Wizar
 
     if parsed.get("scope"):
         state.scope = parsed["scope"]
+    if parsed.get("global_timeout"):
+        state.global_timeout = int(parsed["global_timeout"])
     return state
 
 
@@ -440,6 +518,13 @@ def _parse_managed_block(text: str) -> dict:
                     result["features"] = [f.strip() for f in value.split(",") if f.strip()]
                 elif key in ("review-chain", "apply-chain"):
                     result[_chain_key(key)] = _parse_chain_value(value)
+                elif key == "reviewers":
+                    from task_relay.review_config import parse_role_entries
+                    result["reviewers"] = parse_role_entries(value)
+                elif key == "arbiter":
+                    from task_relay.review_config import parse_role_entries
+                    result.setdefault("arbiters", [])
+                    result["arbiters"].extend(parse_role_entries(value))
                 elif key == "primary":
                     result["primary"] = value
                 elif key == "mode":
@@ -448,6 +533,8 @@ def _parse_managed_block(text: str) -> dict:
                     result["sub_agent"] = value
                 elif key == "scope":
                     result["scope"] = value
+                elif key == "global-timeout":
+                    result["global_timeout"] = int(value)
 
             # Parse models sub-block
             in_models = False

@@ -5,6 +5,16 @@ from importlib import resources
 from pathlib import Path
 import shutil
 
+from task_relay.review_config import (
+    DEFAULT_GLOBAL_TIMEOUT,
+    DEFAULT_REVIEWER_PERSONA,
+    ReviewRoleEntry,
+    default_arbiter_entries,
+    format_role_entries,
+    migrate_legacy_review_chain,
+    parse_role_entries,
+)
+
 MANAGED_BLOCK_START = "<!-- task-relay:start -->"
 MANAGED_BLOCK_END = "<!-- task-relay:end -->"
 LEGACY_BLOCK_START = "<!-- task-relay:openspec-delegation:start -->"
@@ -80,9 +90,12 @@ def _has_managed_block(path: Path) -> bool:
 def build_guidance_block(
     primary_agent: str,
     features: list[str],
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
     scope: str,
+    global_timeout: int = DEFAULT_GLOBAL_TIMEOUT,
+    legacy_review_chain: list[tuple[str, str | None]] | None = None,
 ) -> str:
     """Generate a dynamic managed guidance block from wizard state."""
     lines = [
@@ -98,15 +111,21 @@ def build_guidance_block(
     else:
         lines.append("- features: none")
 
-    if review_chain:
-        lines.append(f"- review-chain: {_format_chain(review_chain)}")
+    if reviewers:
+        lines.append(f"- reviewers: {format_role_entries(reviewers)}")
+    if arbiters:
+        for arbiter in arbiters:
+            lines.append(f"- arbiter: {format_role_entries([arbiter])}")
+        lines.append(f"- global-timeout: {global_timeout}")
+    if legacy_review_chain:
+        lines.append(f"- review-chain: {_format_chain(legacy_review_chain)}")
     if apply_chain:
         lines.append(f"- apply-chain: {_format_chain(apply_chain)}")
 
     lines.append("")
-    lines.append(_features_header(features, primary_agent, review_chain, apply_chain))
+    lines.append(_features_header(features, primary_agent, reviewers, arbiters, apply_chain))
     lines.append("")
-    lines.extend(_features_policy(features, primary_agent, review_chain, apply_chain))
+    lines.extend(_features_policy(features, primary_agent, reviewers, arbiters, apply_chain, global_timeout))
     lines.append("")
     lines.append(MANAGED_BLOCK_END)
 
@@ -124,15 +143,19 @@ def _format_chain(chain: list[tuple[str, str | None]]) -> str:
 def _features_header(
     features: list[str],
     primary_agent: str,
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
 ) -> str:
     if not features:
         return f"Delegation mode: main — all work stays with {primary_agent}."
 
     parts: list[str] = []
-    if review_chain:
-        parts.append(f"review via {_format_chain(review_chain)}")
+    if reviewers:
+        review_desc = f"parallel review via {format_role_entries(reviewers)}"
+        if arbiters:
+            review_desc += f" with arbitration via {format_role_entries(arbiters)}"
+        parts.append(review_desc)
     if apply_chain:
         parts.append(f"apply via {_format_chain(apply_chain)}")
 
@@ -143,8 +166,10 @@ def _features_header(
 def _features_policy(
     features: list[str],
     primary_agent: str,
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
+    global_timeout: int,
 ) -> list[str]:
     if not features:
         return [
@@ -159,28 +184,22 @@ def _features_policy(
     policy.append("- Integration of delegated output and final verification.")
     policy.append("")
 
-    if "review" in features and review_chain:
+    if "review" in features and reviewers:
         policy.append("## Review Workflow (propose phase)")
         policy.append("")
-        primary_review = review_chain[0][0]
         policy.append(f"When a proposal is ready for review, {primary_agent} SHALL:")
-        policy.append(f"1. Package the proposal context using the `review-proposal` template.")
-        policy.append(f"2. Delegate to review chain (primary: {primary_review}).")
-        policy.append(f"3. The review agent evaluates requirement clarity, direction correctness,")
-        policy.append(f"   and implementation plan completeness.")
-        policy.append(f"4. The review agent writes findings to `spec/delegation_review.md`.")
-        policy.append(f"5. The review agent MUST ask the user when encountering ambiguity")
-        policy.append(f"   rather than defining solutions independently.")
-        policy.append(f"6. Delegate with `trly run --target <agent> --prompt-file <packet>"
-                      f" --expect-output spec/delegation_review.md` so a missing or empty review"
-                      f" fails loudly instead of being trusted from stdout.")
-        policy.append(f"7. If the run fails with a delegation-output error, re-run or escalate;"
-                      f" do NOT treat the review as done.")
-        policy.append(f"8. {primary_agent} MUST read the review artifact content before adopting it; a non-empty file only proves the gate passed.")
-        policy.append(f"9. {primary_agent} reads the review and updates proposal artifacts as needed.")
+        policy.append("1. Package reviewer and arbiter packets using `review-proposal` and `review-arbiter` templates.")
+        policy.append(f"2. Run all configured reviewers in parallel: {format_role_entries(reviewers)}.")
+        if arbiters:
+            policy.append(f"3. Run arbiters serially in order: {format_role_entries(arbiters)}.")
+        policy.append("4. Reviewers write unique JSON artifacts and arbiters write decision JSON.")
+        policy.append("5. The CLI validates JSON artifacts and computes final gate state programmatically.")
+        policy.append(f"6. Global review gate timeout is `{global_timeout}` seconds unless overridden.")
+        policy.append(f"7. {primary_agent} may only apply `REVISE` items to OpenSpec artifacts; revision direction comes only from the arbiter's adjudicated contract, and {primary_agent} MUST NOT re-arbitrate reviewer conflicts or directly adopt unadjudicated reviewer suggestions.")
+        policy.append(f"8. `REJECT` stops before apply. `APPROVE` proceeds directly, and `REVISE` may proceed after {primary_agent} applies the arbiter revision contract.")
         policy.append("")
-        policy.append("Review agent non-goals: do not modify OpenSpec state, mark tasks,")
-        policy.append("perform destructive operations, or make architecture decisions.")
+        policy.append("Reviewer and arbiter non-goals: do not modify OpenSpec state, mark tasks,")
+        policy.append("perform destructive operations, or make final file edits.")
         policy.append("")
 
     if "apply" in features and apply_chain:
@@ -212,7 +231,7 @@ def _features_policy(
     policy.append("## Task Tags")
     policy.append("")
     if "review" in features:
-        policy.append("- `[delegate:review]` — route proposal review to review chain.")
+        policy.append("- `[delegate:review]` — route proposal review to parallel reviewers plus serial arbiters.")
     if "apply" in features:
         policy.append(f"- `[delegate:{apply_chain[0][0] if apply_chain else 'apply'}]` — route implementation to apply chain.")
         policy.append("- `[delegate:test]` — route test authoring.")
@@ -289,6 +308,11 @@ def parse_existing_block(path: Path) -> dict | None:
                 result["features"] = [f.strip() for f in value.split(",") if f.strip() and f.strip() != "none"]
             elif key in ("review-chain", "apply-chain"):
                 result[key.replace("-", "_")] = _parse_chain_value(value)
+            elif key == "reviewers":
+                result["reviewers"] = parse_role_entries(value)
+            elif key == "arbiter":
+                result.setdefault("arbiters", [])
+                result["arbiters"].extend(parse_role_entries(value))
             elif key == "primary":
                 result["primary"] = value
             elif key == "mode":
@@ -297,10 +321,18 @@ def parse_existing_block(path: Path) -> dict | None:
                 result["sub_agent"] = value
             elif key == "scope":
                 result["scope"] = value
+            elif key == "global-timeout":
+                result["global_timeout"] = int(value)
 
         # Legacy format → new format mapping
         if not result.get("features") and result.get("mode") and result["mode"] != "main":
             result["features"] = ["apply"]
+        if not result.get("reviewers") and result.get("review_chain"):
+            result["reviewers"] = migrate_legacy_review_chain(result["review_chain"])
+        if result.get("reviewers") and not result.get("arbiters"):
+            result["arbiters"] = default_arbiter_entries()
+        if "global_timeout" not in result:
+            result["global_timeout"] = DEFAULT_GLOBAL_TIMEOUT
         if not result.get("apply_chain") and result.get("sub_agent"):
             sub = result["sub_agent"]
             models_dict = result.get("models") or {}
@@ -335,8 +367,10 @@ def install_skill_bundle(
     skill_root: Path,
     primary_agent: str,
     features: list[str],
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
+    global_timeout: int = DEFAULT_GLOBAL_TIMEOUT,
 ) -> None:
     """Write the task-relay-delegation skill bundle to *skill_root*."""
     bundle_root = skill_root / SKILL_NAME
@@ -345,17 +379,18 @@ def install_skill_bundle(
     bundle_root.mkdir(parents=True, exist_ok=True)
 
     bundle_root.joinpath("SKILL.md").write_text(
-        _build_skill_md(primary_agent, features, review_chain, apply_chain),
+        _build_skill_md(primary_agent, features, reviewers, arbiters, apply_chain, global_timeout),
         encoding="utf-8",
     )
 
     agents_dir = bundle_root / "agents"
     agents_dir.mkdir(exist_ok=True)
-    _write_agent_configs(agents_dir, review_chain, apply_chain)
+    _write_agent_configs(agents_dir, reviewers, arbiters, apply_chain)
 
     templates_dir = bundle_root / "templates"
     templates_dir.mkdir(exist_ok=True)
     _copy_templates(templates_dir)
+    _copy_personas(bundle_root / "personas")
     _remove_named_skill_bundle(skill_root, LEGACY_SKILL_NAME)
 
 
@@ -377,8 +412,10 @@ def _remove_named_skill_bundle(skill_root: Path, skill_name: str) -> bool:
 def _build_skill_md(
     primary_agent: str,
     features: list[str],
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
+    global_timeout: int,
 ) -> str:
     lines = [
         "---",
@@ -393,13 +430,22 @@ def _build_skill_md(
         "",
     ]
 
-    if review_chain:
-        lines.append("### Review Chain")
+    if reviewers:
+        lines.append("### Reviewers")
         lines.append("")
-        for i, (agent, model) in enumerate(review_chain):
-            role = "primary" if i == 0 else f"fallback {i}"
-            model_str = model or "default"
-            lines.append(f"- {role}: **{agent}** (model: {model_str})")
+        for reviewer in reviewers:
+            model_str = reviewer.model or "default"
+            persona = reviewer.persona or DEFAULT_REVIEWER_PERSONA
+            lines.append(f"- **{reviewer.agent}** persona `{persona}` (model: {model_str})")
+        lines.append("")
+    if arbiters:
+        lines.append("### Arbiter Chain")
+        lines.append("")
+        for i, arbiter in enumerate(arbiters, start=1):
+            model_str = arbiter.model or "default"
+            lines.append(f"- stage {i}: **{arbiter.agent}** persona `{arbiter.persona}` (model: {model_str})")
+        lines.append("")
+        lines.append(f"Global timeout: `{global_timeout}` seconds.")
         lines.append("")
 
     if apply_chain:
@@ -417,22 +463,17 @@ def _build_skill_md(
     lines.append("delegate from free-form chat. Package context first, then run the selected")
     lines.append("chain target with the packet file.")
     lines.append("")
-    if "review" in features and review_chain:
-        primary_review = review_chain[0][0]
+    if "review" in features and reviewers:
         lines.append("#### Review")
         lines.append("")
         lines.append("Use review during the OpenSpec propose phase:")
         lines.append("")
         lines.append("```bash")
-        lines.append("trly pack --mode review-proposal --change <change> --out <packet>")
-        lines.append(
-            f"trly run --target {primary_review} --prompt-file <packet> --expect-output spec/delegation_review.md"
-        )
+        lines.append("trly review-gate --change <change>")
         lines.append("```")
         lines.append("")
-        lines.append("The review delegate must write `spec/delegation_review.md`. The primary")
-        lines.append("agent must read that artifact before accepting findings; a non-empty file")
-        lines.append("only proves the output gate passed.")
+        lines.append("The review gate runs reviewers in parallel, arbiters in order, validates")
+        lines.append("JSON artifacts, and writes a merged `spec/delegation_review.md` summary.")
         lines.append("")
     if "apply" in features and apply_chain:
         primary_apply = apply_chain[0][0]
@@ -472,12 +513,15 @@ def _build_skill_md(
 
 def _write_agent_configs(
     agents_dir: Path,
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
 ) -> None:
     """Write agent config files for all agents in review and apply chains."""
     seen: set[str] = set()
-    for agent, _model in review_chain + apply_chain:
+    review_agents = [(entry.agent, entry.model) for entry in reviewers]
+    arbiter_agents = [(entry.agent, entry.model) for entry in arbiters]
+    for agent, _model in review_agents + arbiter_agents + apply_chain:
         if agent in seen:
             continue
         seen.add(agent)
@@ -525,6 +569,7 @@ def _copy_templates(templates_dir: Path) -> None:
         "review.md": "# Review Findings\n\n",
         "diagnosis.md": "# Diagnosis\n\n",
         "review-proposal.md": "# Review Proposal\n\n",
+        "review-arbiter.md": "# Review Arbiter\n\n",
     }
 
     try:
@@ -545,19 +590,43 @@ def _copy_templates(templates_dir: Path) -> None:
         templates_dir.joinpath(name).write_text(content, encoding="utf-8")
 
 
+def _copy_personas(personas_dir: Path) -> None:
+    personas_dir.mkdir(exist_ok=True)
+    try:
+        asset_root = resources.files("task_relay.assets").joinpath(f"{SKILL_NAME}/personas")
+        for source in asset_root.iterdir():
+            if source.is_file():
+                personas_dir.joinpath(source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        return
+    except Exception:
+        pass
+
+
 def install(
     primary_agent: str,
     scope: str,
     features: list[str],
-    review_chain: list[tuple[str, str | None]],
+    reviewers: list[ReviewRoleEntry],
+    arbiters: list[ReviewRoleEntry],
     apply_chain: list[tuple[str, str | None]],
+    global_timeout: int = DEFAULT_GLOBAL_TIMEOUT,
+    legacy_review_chain: list[tuple[str, str | None]] | None = None,
     cwd: str | Path | None = None,
 ) -> InstallResult:
     """Install delegation guidance for the given configuration."""
     guidance_path, skill_root = resolve_install_paths(primary_agent, scope, cwd)
 
     existing = guidance_path.read_text(encoding="utf-8") if guidance_path.exists() else ""
-    block = build_guidance_block(primary_agent, features, review_chain, apply_chain, scope)
+    block = build_guidance_block(
+        primary_agent,
+        features,
+        reviewers,
+        arbiters,
+        apply_chain,
+        scope,
+        global_timeout=global_timeout,
+        legacy_review_chain=legacy_review_chain,
+    )
 
     if _has_managed_block(guidance_path):
         updated = _replace_managed_block(existing, block)
@@ -570,7 +639,7 @@ def install(
     guidance_path.parent.mkdir(parents=True, exist_ok=True)
     guidance_path.write_text(updated, encoding="utf-8")
 
-    install_skill_bundle(skill_root, primary_agent, features, review_chain, apply_chain)
+    install_skill_bundle(skill_root, primary_agent, features, reviewers, arbiters, apply_chain, global_timeout)
 
     return InstallResult(
         guidance_path=guidance_path,

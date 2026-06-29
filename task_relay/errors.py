@@ -30,6 +30,18 @@ class PacketGenerationError(TaskRelayError):
     """A delegation packet could not be generated (unknown mode or unresolvable read)."""
 
 
+class ReviewGateConfigError(TaskRelayError):
+    """Review gate configuration is invalid."""
+
+
+class ReviewGateTimeoutError(TaskRelayError):
+    """Review gate exceeded the configured global timeout."""
+
+
+class ReviewArtifactError(TaskRelayError):
+    """Review gate artifact verification failed."""
+
+
 
 
 class DirtyWorkingTreeError(TaskRelayError):
