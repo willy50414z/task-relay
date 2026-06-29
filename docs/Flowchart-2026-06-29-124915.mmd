@@ -1,0 +1,35 @@
+---
+config:
+  theme: redux
+---
+flowchart TB
+    n1["[node]呼叫[plan agent]透過/opsx:explore理解並確認需求"] --> n2["[plan agent]確認這個需求是否需要拆解成多個段開發"]
+    n2 -- YES --> n3["[plan agent]建議user將這個需求拆分成多個階段，並明確寫出多個階段的階段性目標"]
+    n2 -- NO --> n4["[plan agent]確認這個需求大小，如果需求改變很小(小bug/change)，是不是可以不產出需求propose文件直接修改"]
+    n3 --> n5["[plan agent]跟user討論好每個階段性任務拆分後，先產出openspec change目錄，裡面產出roadmap.md列出整個開發計畫及拆分的每個階段性目標，然後再次透過/opsx:explore逐個探索子需求的細節"]
+    n5 --> n4
+    n4 -- YES --> n6["直接修改"]
+    n4 -- NO --> n7["[plan agent]根據/opsx:propose將需求產出開發計畫"]
+    n7 --> n8["[node]呼叫reviewer review propose，將意見產出到delegate_advice.md"]
+    n8 --> n15["有修改意見"]
+    n9["[node]呼叫Arbiter進行仲裁"] --> n10["[node]呼叫[apply agent]根據仲裁結果修改開發計畫"]
+    n10 --> n11["[apply agent]透過/opsx:apply執行開發計畫(中間可能透過開發計畫呼叫[delegate agent])"]
+    n11 --> n12["這個change是主change?"]
+    n12 -- YES --> n13["Finish"]
+    n14["整個roadmap已經開發完成了"] -- NO --> n7
+    n6 --> n13
+    n15 -- YES --> n9
+    n15 -- NO --> n10
+    n12 -- NO --> n16["更新roadmap進度"]
+    n16 --> n14
+    n14 -- YES --> n13
+
+    n1@{ shape: rect}
+    n2@{ shape: decision}
+    n4@{ shape: decision}
+    n15@{ shape: decision}
+    n12@{ shape: decision}
+    n14@{ shape: decision}
+    style n1 stroke:#FF6D00
+    style n2 stroke:#FF6D00
+    style n3 stroke:#FF6D00
