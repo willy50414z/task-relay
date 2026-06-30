@@ -30,6 +30,7 @@ def handle_apply(args: Namespace) -> int:
         diff_file=getattr(args, "diff_file", None),
         diff_from=getattr(args, "diff_from", None),
         full_change_context=False,
+        cache_layout=getattr(args, "cache_layout", False),
     )
     stdout, branch = core.run_isolated(
         target=args.target,

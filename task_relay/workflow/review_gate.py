@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from task_relay import jobs
 from task_relay.delegation import parse_existing_block
 from task_relay.errors import ReviewArtifactError, ReviewGateConfigError, ReviewGateTimeoutError
 from task_relay.packer import build_packet
@@ -173,7 +174,15 @@ async def _run_reviewer(
     packet_text = _prepend_persona_packet(entry, packet_text, output_path)
     packet_path = _write_temp_packet(packet_text)
     try:
-        await _run_subprocess(_reviewer_command(entry, packet_path, output_path), cwd=cwd, timeout=timeout)
+        await _run_subprocess(
+            _reviewer_command(entry, packet_path, output_path),
+            cwd=cwd,
+            timeout=timeout,
+            target=entry.agent,
+            role=reviewer_id,
+            change=change,
+            expected_output=output_path,
+        )
         payload = _validate_reviewer_artifact(output_path)
         return ReviewArtifact(reviewer_id=reviewer_id, entry=entry, path=output_path, payload=payload)
     finally:
@@ -195,7 +204,15 @@ async def _run_arbiter(
     packet_text = _prepend_arbiter_packet(entry, packet_text, reviewers, prior_arbiters, output_path)
     packet_path = _write_temp_packet(packet_text)
     try:
-        await _run_subprocess(_reviewer_command(entry, packet_path, output_path), cwd=cwd, timeout=timeout)
+        await _run_subprocess(
+            _reviewer_command(entry, packet_path, output_path),
+            cwd=cwd,
+            timeout=timeout,
+            target=entry.agent,
+            role=stage_id,
+            change=change,
+            expected_output=output_path,
+        )
         payload = _validate_arbiter_artifact(output_path)
         return ArbiterArtifact(stage_id=stage_id, entry=entry, path=output_path, payload=payload)
     finally:
@@ -218,22 +235,46 @@ def _reviewer_command(entry: ReviewRoleEntry, packet_path: Path, output_path: Pa
     return cmd
 
 
-async def _run_subprocess(cmd: list[str], *, cwd: str, timeout: float) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+async def _run_subprocess(
+    cmd: list[str],
+    *,
+    cwd: str,
+    timeout: float,
+    target: str | None = None,
+    role: str | None = None,
+    change: str | None = None,
+    expected_output: Path | None = None,
+) -> None:
+    result = await jobs.run_async(
+        jobs.JobSpec(
+            command=cmd,
+            cwd=cwd,
+            timeout=timeout,
+            target=target,
+            role=role,
+            change=change,
+            expected_outputs=[str(expected_output)] if expected_output else [],
+        )
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        raise
-    if proc.returncode != 0:
-        detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
-        raise ReviewArtifactError(f"review gate subprocess failed ({proc.returncode}): {detail}")
+    if result.status == jobs.JOB_STATUS_TIMEOUT:
+        raise ReviewGateTimeoutError(_job_detail("review gate subprocess timed out", result, expected_output))
+    if result.status != jobs.JOB_STATUS_SUCCEEDED:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise ReviewArtifactError(
+            _job_detail(f"review gate subprocess failed ({result.returncode}): {detail}", result, expected_output)
+        )
+
+
+def _job_detail(message: str, result: jobs.JobRunResult, expected_output: Path | None) -> str:
+    parts = [
+        message,
+        f"job_id={result.job_id}",
+        f"status={result.status}",
+        f"log={result.log_path}",
+    ]
+    if expected_output is not None:
+        parts.append(f"expected_output={expected_output}")
+    return " | ".join(parts)
 
 
 def _validate_config(config: ReviewGateConfig) -> None:

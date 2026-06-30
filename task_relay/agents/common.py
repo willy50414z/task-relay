@@ -7,6 +7,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
+from task_relay import jobs
 from task_relay.errors import AgentExecutionError, AgentQuotaError, AgentTimeoutError
 from task_relay.types import AgentUsage, TargetStatus
 
@@ -52,6 +53,8 @@ class SubprocessResult:
     stdout: str
     retries: int
     usage: AgentUsage | None = None
+    job_id: str | None = None
+    log_path: str | None = None
 
     def __str__(self) -> str:
         return self.stdout
@@ -64,6 +67,8 @@ class SubprocessResult:
                 self.stdout == other.stdout
                 and self.retries == other.retries
                 and self.usage == other.usage
+                and self.job_id == other.job_id
+                and self.log_path == other.log_path
             )
         return NotImplemented
 
@@ -194,6 +199,12 @@ def run_subprocess(
     target: str,
     wait_on_hard_quota: bool = True,
     parse_json_output: bool = False,
+    role: str | None = None,
+    change: str | None = None,
+    task: str | None = None,
+    branch: str | None = None,
+    session: str | None = None,
+    model: str | None = None,
 ) -> SubprocessResult:
     # Hard exhaustion is bounded by total wall-time, not an unbounded retry count
     # (the old 288 x 300s default could hang silently for ~24h). Transient
@@ -210,16 +221,22 @@ def run_subprocess(
 
     while True:
         try:
-            completed = subprocess.run(
-                command,
-                input=stdin_input,
-                capture_output=True,
-                text=True,
-                encoding=encoding,
-                errors="replace",
-                cwd=cwd,
-                env=env,
-                timeout=timeout,
+            completed = jobs.run_blocking(
+                jobs.JobSpec(
+                    command=command,
+                    stdin_input=stdin_input,
+                    cwd=cwd,
+                    env=env,
+                    encoding=encoding,
+                    timeout=timeout,
+                    target=target,
+                    model=model,
+                    role=role,
+                    change=change,
+                    task=task,
+                    branch=branch,
+                    session=session,
+                )
             )
         except subprocess.TimeoutExpired as exc:
             raise AgentTimeoutError(f"{target} subprocess timed out") from exc
@@ -228,25 +245,35 @@ def run_subprocess(
         except Exception as exc:
             raise AgentExecutionError(f"{target} subprocess error: {exc}") from exc
 
-        if completed.returncode == 0:
+        if completed.status == jobs.JOB_STATUS_TIMEOUT:
+            raise AgentTimeoutError(f"{target} subprocess timed out job_id={completed.job_id} log={completed.log_path}")
+
+        if completed.returncode == 0 and completed.status == jobs.JOB_STATUS_SUCCEEDED:
             stdout = (completed.stdout or "").strip()
             usage = None
             if parse_json_output:
                 stdout, usage = _parse_agent_json(stdout)
-            return SubprocessResult(stdout=stdout, retries=retry_count, usage=usage)
+            return SubprocessResult(
+                stdout=stdout,
+                retries=retry_count,
+                usage=usage,
+                job_id=completed.job_id,
+                log_path=completed.log_path,
+            )
 
         stderr = (completed.stderr or "").strip()
         stdout = (completed.stdout or "").strip()
         detail = "\n".join(part for part in (stderr, stdout) if part) or "(no output)"
+        job_detail = f" job_id={completed.job_id} log={completed.log_path}"
         kind = classify_quota_error(detail)
 
         if kind is None:
-            raise AgentExecutionError(f"{target} CLI failed (exit {completed.returncode}): {detail[:500]}")
+            raise AgentExecutionError(f"{target} CLI failed (exit {completed.returncode}): {detail[:500]}{job_detail}")
 
         if kind == "transient":
             if transient_attempts >= transient_max:
                 raise AgentQuotaError(
-                    f"{target} throttled: {transient_max} transient retries exhausted. Last error: {detail[:300]}"
+                    f"{target} throttled: {transient_max} transient retries exhausted. Last error: {detail[:300]}{job_detail}"
                 )
             wait = _parse_retry_after(detail)
             if wait is None:
@@ -266,14 +293,14 @@ def run_subprocess(
         # kind == "hard"
         if not wait_on_hard_quota:
             raise AgentQuotaError(
-                f"{target} quota exhausted (fast-fallback: not waiting). Last error: {detail[:300]}"
+                f"{target} quota exhausted (fast-fallback: not waiting). Last error: {detail[:300]}{job_detail}"
             )
         now = time.monotonic()
         if hard_deadline is None:
             hard_deadline = now + hard_budget
         if now >= hard_deadline:
             raise AgentQuotaError(
-                f"{target} quota exhausted: hard retry budget ({hard_budget:.0f}s) elapsed. Last error: {detail[:300]}"
+                f"{target} quota exhausted: hard retry budget ({hard_budget:.0f}s) elapsed. Last error: {detail[:300]}{job_detail}"
             )
         wait = min(hard_interval, hard_deadline - now)
         retry_count += 1

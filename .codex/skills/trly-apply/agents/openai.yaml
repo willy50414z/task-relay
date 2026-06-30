@@ -1,0 +1,4 @@
+interface:
+  display_name: "trly apply"
+  short_description: "Run Task Relay delegated apply"
+  default_prompt: "Use $trly-apply to apply an OpenSpec task with Task Relay delegation."

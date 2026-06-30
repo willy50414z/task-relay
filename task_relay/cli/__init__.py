@@ -7,6 +7,7 @@ from typing import Sequence
 from task_relay.cli.evaluate import handle_evaluate
 from task_relay.cli.health import handle_health
 from task_relay.cli.doctor import handle_doctor
+from task_relay.cli.jobs import handle_jobs
 from task_relay.cli.pack import handle_pack, handle_pack_benchmark, handle_pack_lint, handle_pack_metrics
 from task_relay.cli.apply import handle_apply
 from task_relay.cli.run import handle_run
@@ -71,7 +72,38 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
         default="HEAD",
         help="With --isolate, branch the ephemeral worktree from this ref instead of HEAD.",
     )
+    run_parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Start the delegate as a background job and print the job id without waiting.",
+    )
     run_parser.set_defaults(handler=handle_run)
+
+    jobs_parser = subparsers.add_parser("jobs", help="Inspect and manage delegated agent jobs.")
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_command", required=True)
+    jobs_list = jobs_sub.add_parser("list", help="List recent delegated jobs.")
+    jobs_list.add_argument("--cwd", help="Project root containing .task_relay/ (defaults to current dir)")
+    jobs_list.set_defaults(handler=handle_jobs)
+    jobs_status = jobs_sub.add_parser("status", help="Show detailed job metadata.")
+    jobs_status.add_argument("job_id")
+    jobs_status.add_argument("--cwd", help="Project root containing .task_relay/ (defaults to current dir)")
+    jobs_status.set_defaults(handler=handle_jobs)
+    jobs_logs = jobs_sub.add_parser("logs", help="Print or follow job logs.")
+    jobs_logs.add_argument("job_id")
+    jobs_logs.add_argument("--cwd", help="Project root containing .task_relay/ (defaults to current dir)")
+    jobs_logs.add_argument("--stream", choices=["stdout", "stderr", "combined"], default="combined")
+    jobs_logs.add_argument("--tail", type=int)
+    jobs_logs.add_argument("--follow", "-f", action="store_true")
+    jobs_logs.set_defaults(handler=handle_jobs)
+    jobs_stop = jobs_sub.add_parser("stop", help="Terminate a running job.")
+    jobs_stop.add_argument("job_id")
+    jobs_stop.add_argument("--cwd", help="Project root containing .task_relay/ (defaults to current dir)")
+    jobs_stop.set_defaults(handler=handle_jobs)
+    jobs_cleanup = jobs_sub.add_parser("cleanup", help="Remove old job session files.")
+    jobs_cleanup.add_argument("--cwd", help="Project root containing .task_relay/ (defaults to current dir)")
+    jobs_cleanup.add_argument("--older-than", type=float, default=7, help="Remove jobs older than this many days.")
+    jobs_cleanup.add_argument("--status", help="Only remove jobs with this status.")
+    jobs_cleanup.set_defaults(handler=handle_jobs)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run outcome-routed execution and emit JSON.")
     add_target_args(evaluate_parser, required=True)
@@ -97,6 +129,7 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     pack_parser.add_argument("--model-resolver", action="store_true", help="Enable opt-in model-assisted scope resolution contract.")
     pack_parser.add_argument("--model-result", help="Structured model resolver result JSON for validation/testing.")
     pack_parser.add_argument("--model-call-limit", type=int, default=1, help="Per-pack model resolver call limit.")
+    pack_parser.add_argument("--cache-layout", action="store_true", help="Reorder packet content for prompt-caching-friendly static/dynamic boundaries.")
     pack_parser.set_defaults(handler=handle_pack)
 
     pack_metrics_parser = subparsers.add_parser("pack-metrics", help="Evaluate packer scope selection against a labeled eval set.")
@@ -175,6 +208,7 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     apply_parser.add_argument("--read", action="append", default=[], dest="extra_reads", metavar="PATH", help="Extra repo file to inline. Repeatable.")
     apply_parser.add_argument("--diff-file", help="Explicit diff file for test-mode dynamic repo context.")
     apply_parser.add_argument("--diff-from", help="Git ref to diff from for test-mode dynamic repo context.")
+    apply_parser.add_argument("--cache-layout", action="store_true", help="Build a prompt-caching-friendly packet layout before delegation.")
     apply_parser.add_argument("--verify-cmd", help="Optional verification command to run in a temp worktree based on the delegated branch.")
     apply_parser.add_argument("--model")
     apply_parser.add_argument("--effort")
@@ -353,10 +387,12 @@ def _print_install_results(results: list[InstallResult]) -> None:
 def _print_post_install_guidance(*, cwd: Path, scope: str, target_agents: list[str], features: list[str]) -> None:
     print("Next steps:")
     print("  1. Run `trly doctor` to verify delegation readiness.")
+    step = 2
     if "review" in features:
-        print("  2. Run `trly review --change <change>` or `trly review-gate --change <change>`.")
+        print(f"  {step}. OpenSpec propose will invoke `$trly-review` after proposal artifacts are written.")
+        step += 1
     if "apply" in features:
-        print("  2. Run `trly apply --change <change> --task <task-id>` for isolated implementation work.")
+        print(f"  {step}. OpenSpec apply will invoke `$trly-apply` for delegated implementation work.")
     report = build_doctor_report(cwd=str(cwd), target_agents=target_agents, scope=scope)
     ok, blockers = summarize_validation(report)
     print(f"Validation: {'passed' if ok else 'failed'}")

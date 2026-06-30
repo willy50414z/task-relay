@@ -51,7 +51,9 @@ def run_eval_set(path: str | Path, *, cwd: str | None = None) -> dict[str, Any]:
             change=example.change,
             task=example.task,
             full_change_context=False,
+            cache_layout_enabled=False,
         )
+        trace_usage = _lookup_trace_usage(cwd, example, "packed")
         selected_specs = {
             str(section["source"])
             for section in report["sections"]
@@ -114,6 +116,7 @@ def run_eval_set(path: str | Path, *, cwd: str | None = None) -> dict[str, Any]:
                 "byte_estimate": report["byte_estimate"],
                 "estimated_input_tokens": _estimate_tokens(int(report["byte_estimate"])),
             },
+            "cache_metrics": _compute_cache_metrics(report, trace_usage),
             "quality_outcome": _normalize_quality_proxy(example.quality_proxy),
         })
 
@@ -175,12 +178,14 @@ def run_context_benchmark(path: str | Path, *, cwd: str | None = None) -> dict[s
             change=example.change,
             task=example.task,
             full_change_context=False,
+            cache_layout_enabled=True,
         )
         full_report = full_plan.to_report(
             mode=example.mode,
             change=example.change,
             task=example.task,
             full_change_context=True,
+            cache_layout_enabled=False,
         )
 
         packed_bytes = int(packed_report["byte_estimate"])
@@ -231,6 +236,7 @@ def run_context_benchmark(path: str | Path, *, cwd: str | None = None) -> dict[s
                 "packed": packed_context_cost,
                 "full": full_context_cost,
             },
+            "cache_metrics": _compute_cache_metrics(packed_report, packed_trace),
             "quality_outcome": quality_proxy,
         })
 
@@ -341,6 +347,39 @@ def _context_cost_payload(byte_estimate: int, duration_ms: float, trace_usage: d
     }
 
 
+def _compute_cache_metrics(
+    report: dict[str, Any],
+    trace_usage: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    static_bytes = report.get("static_byte_count")
+    dynamic_bytes = report.get("dynamic_byte_count")
+    if static_bytes is None and dynamic_bytes is None and trace_usage is None:
+        return None
+
+    cache_write_tokens = trace_usage.get("cache_creation_input_tokens") if trace_usage else None
+    cache_read_tokens = trace_usage.get("cache_read_input_tokens") if trace_usage else None
+    authoritative = cache_write_tokens is not None or cache_read_tokens is not None
+    cache_hit = bool(cache_read_tokens) if authoritative else None
+
+    metrics: dict[str, Any] = {
+        "static_byte_count": static_bytes,
+        "dynamic_byte_count": dynamic_bytes,
+        "cache_write_tokens": cache_write_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_hit": cache_hit,
+    }
+    if authoritative:
+        metrics["estimated_savings_tokens"] = int(cache_read_tokens or 0) * 9
+        metrics["estimated_savings_authoritative"] = True
+    elif static_bytes is not None:
+        metrics["estimated_savings_tokens"] = _estimate_tokens(int(static_bytes))
+        metrics["estimated_savings_authoritative"] = False
+    else:
+        metrics["estimated_savings_tokens"] = None
+        metrics["estimated_savings_authoritative"] = False
+    return metrics
+
+
 def _lookup_trace_usage(cwd: str | None, example: EvalExample, variant: str) -> dict[str, Any] | None:
     filters = (example.trace_filters or {}).get(variant)
     if not isinstance(filters, dict):
@@ -364,5 +403,7 @@ def _lookup_trace_usage(cwd: str | None, example: EvalExample, variant: str) -> 
             "input_tokens": payload.get("tokens_in", "unavailable"),
             "output_tokens": payload.get("tokens_out", "unavailable"),
             "cost_usd": payload.get("cost_usd", "unavailable"),
+            "cache_creation_input_tokens": payload.get("cache_creation_input_tokens"),
+            "cache_read_input_tokens": payload.get("cache_read_input_tokens"),
         }
     return None

@@ -12,20 +12,35 @@ class CodexRunner:
         self.default_model = default_model
         self.default_effort = default_effort
 
-    def run(self, request: AgentRunRequest) -> AgentRunResult:
+    def build_command(
+        self,
+        *,
+        prompt: str,
+        cwd: str | None,
+        model: str | None,
+        effort: str | None,
+    ) -> tuple[list[str], dict[str, str], str | None]:
         command = [
             resolve_cli("codex"),
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
         ]
-        model = request.model or self.default_model
-        effort = request.effort or self.default_effort
-        if model:
-            command.extend(["--model", model])
-        if effort:
-            command.extend(["-c", f"model_reasoning_effort={effort}"])
-        env = dict(os.environ)
+        resolved_model = model or self.default_model
+        resolved_effort = effort or self.default_effort
+        if resolved_model:
+            command.extend(["--model", resolved_model])
+        if resolved_effort:
+            command.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
+        return command, dict(os.environ), resolved_model
+
+    def run(self, request: AgentRunRequest) -> AgentRunResult:
+        command, env, model = self.build_command(
+            prompt=request.prompt,
+            cwd=request.cwd,
+            model=request.model,
+            effort=request.effort,
+        )
         if request.extra_env:
             env.update(request.extra_env)
         result = run_subprocess(
@@ -37,6 +52,12 @@ class CodexRunner:
             timeout=request.timeout,
             target=self.name,
             wait_on_hard_quota=request.wait_on_hard_quota,
+            role=request.role,
+            change=request.change,
+            task=request.task,
+            branch=request.branch,
+            session=request.session,
+            model=model,
         )
         return AgentRunResult(
             stdout=result.stdout,
@@ -44,6 +65,8 @@ class CodexRunner:
             model=model,
             retries=result.retries,
             usage=result.usage,
+            job_id=result.job_id,
+            log_path=result.log_path,
         )
 
     def check(self) -> TargetStatus:

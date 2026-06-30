@@ -18,24 +18,29 @@ class DeepSeekRunner:
         self.default_model = default_model or DEEPSEEK_DEFAULT_MODEL
         self.default_effort = default_effort or DEEPSEEK_EFFORT_LEVEL
 
-    def run(self, request: AgentRunRequest) -> AgentRunResult:
+    def build_command(
+        self,
+        *,
+        prompt: str,
+        cwd: str | None,
+        model: str | None,
+        effort: str | None,
+    ) -> tuple[list[str], dict[str, str], str]:
         token = os.environ.get("DEEPSEEK_AUTH_TOKEN", "").strip()
         if not token:
             raise AgentExecutionError(
                 "DEEPSEEK_AUTH_TOKEN environment variable is required for deepseek target."
             )
-        model = request.model or self.default_model
+        resolved_model = model or self.default_model
         env = dict(os.environ)
         env["ANTHROPIC_BASE_URL"] = DEEPSEEK_BASE_URL
         env["ANTHROPIC_AUTH_TOKEN"] = token
-        env["ANTHROPIC_MODEL"] = model
-        env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+        env["ANTHROPIC_MODEL"] = resolved_model
+        env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = resolved_model
+        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = resolved_model
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = DEEPSEEK_SUBAGENT_MODEL
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = DEEPSEEK_SUBAGENT_MODEL
-        env["CLAUDE_CODE_EFFORT_LEVEL"] = request.effort or self.default_effort
-        if request.extra_env:
-            env.update(request.extra_env)
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = effort or self.default_effort
         command = [
             resolve_cli("claude"),
             "--print",
@@ -43,8 +48,19 @@ class DeepSeekRunner:
             "json",
             "--dangerously-skip-permissions",
         ]
-        if request.model:
-            command.extend(["--model", request.model])
+        if model:
+            command.extend(["--model", model])
+        return command, env, resolved_model
+
+    def run(self, request: AgentRunRequest) -> AgentRunResult:
+        command, env, model = self.build_command(
+            prompt=request.prompt,
+            cwd=request.cwd,
+            model=request.model,
+            effort=request.effort,
+        )
+        if request.extra_env:
+            env.update(request.extra_env)
         result = run_subprocess(
             command,
             stdin_input=request.prompt,
@@ -55,6 +71,12 @@ class DeepSeekRunner:
             target=self.name,
             wait_on_hard_quota=request.wait_on_hard_quota,
             parse_json_output=True,
+            role=request.role,
+            change=request.change,
+            task=request.task,
+            branch=request.branch,
+            session=request.session,
+            model=model,
         )
         return AgentRunResult(
             stdout=result.stdout,
@@ -62,6 +84,8 @@ class DeepSeekRunner:
             model=model,
             retries=result.retries,
             usage=result.usage,
+            job_id=result.job_id,
+            log_path=result.log_path,
         )
 
     def check(self) -> TargetStatus:

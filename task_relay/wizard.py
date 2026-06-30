@@ -175,7 +175,7 @@ def prompt_features(state: WizardState, prompt: PromptAdapter) -> WizardState:
         "review": "Review — review agent validates proposals for clarity, correctness, and completeness",
         "apply": "Apply — apply agent implements changes (replaces legacy sub-agent)",
     }
-    default = state.features or ["apply"]
+    default = state.features or []
     choices = [Choice(value=opt, title=labels.get(opt, opt)) for opt in options]
     selected = prompt.checkbox("Select features to enable:", choices, default=default)
     selected = [choice for choice in options if choice in selected]

@@ -21,6 +21,8 @@ LEGACY_BLOCK_START = "<!-- task-relay:openspec-delegation:start -->"
 LEGACY_BLOCK_END = "<!-- task-relay:openspec-delegation:end -->"
 
 SKILL_NAME = "task-relay-delegation"
+REVIEW_SKILL_NAME = "trly-review"
+APPLY_SKILL_NAME = "trly-apply"
 LEGACY_SKILL_NAME = "openspec-deepseek-delegation"
 
 _GUIDANCE_FILE: dict[str, str] = {
@@ -152,7 +154,7 @@ def _features_header(
 
     parts: list[str] = []
     if reviewers:
-        review_desc = f"parallel review via {format_role_entries(reviewers)}"
+        review_desc = f"review via {format_role_entries(reviewers)}"
         if arbiters:
             review_desc += f" with arbitration via {format_role_entries(arbiters)}"
         parts.append(review_desc)
@@ -185,18 +187,21 @@ def _features_policy(
     policy.append("")
 
     if "review" in features and reviewers:
-        policy.append("## Review Workflow (propose phase)")
+        policy.append("## Review Workflow (post-propose phase)")
         policy.append("")
-        policy.append(f"When a proposal is ready for review, {primary_agent} SHALL:")
-        policy.append("1. Package reviewer and arbiter packets using `review-proposal` and `review-arbiter` templates.")
-        policy.append(f"2. Run all configured reviewers in parallel: {format_role_entries(reviewers)}.")
+        policy.append("When review is enabled, OpenSpec propose workflows SHALL invoke `$trly-review`")
+        policy.append("after proposal artifacts are written. OpenSpec explore remains primary-only.")
+        policy.append("")
+        policy.append("The `trly-review` skill packages reviewer and arbiter packets using")
+        policy.append("`review-proposal` and `review-arbiter` templates.")
+        policy.append(f"Configured reviewers: {format_role_entries(reviewers)}.")
         if arbiters:
-            policy.append(f"3. Run arbiters serially in order: {format_role_entries(arbiters)}.")
-        policy.append("4. Reviewers write unique JSON artifacts and arbiters write decision JSON.")
-        policy.append("5. The CLI validates JSON artifacts and computes final gate state programmatically.")
-        policy.append(f"6. Global review gate timeout is `{global_timeout}` seconds unless overridden.")
-        policy.append(f"7. {primary_agent} may only apply `REVISE` items to OpenSpec artifacts; revision direction comes only from the arbiter's adjudicated contract, and {primary_agent} MUST NOT re-arbitrate reviewer conflicts or directly adopt unadjudicated reviewer suggestions.")
-        policy.append(f"8. `REJECT` stops before apply. `APPROVE` proceeds directly, and `REVISE` may proceed after {primary_agent} applies the arbiter revision contract.")
+            policy.append(f"Configured arbiters: {format_role_entries(arbiters)}.")
+        policy.append(f"Global review gate timeout is `{global_timeout}` seconds unless overridden.")
+        policy.append("")
+        policy.append("For `REVISE`, the primary agent may only apply arbiter-adjudicated")
+        policy.append("`actionable_items` to named OpenSpec artifacts, and MUST NOT re-arbitrate")
+        policy.append("reviewer conflicts or directly adopt unadjudicated reviewer suggestions.")
         policy.append("")
         policy.append("Reviewer and arbiter non-goals: do not modify OpenSpec state, mark tasks,")
         policy.append("perform destructive operations, or make final file edits.")
@@ -206,21 +211,29 @@ def _features_policy(
         policy.append("## Apply Workflow (implementation phase)")
         policy.append("")
         primary_apply = apply_chain[0][0]
+        policy.append("When apply is enabled, OpenSpec propose workflows SHALL prepare delegate-ready")
+        policy.append("work before implementation begins: tasks must be granular, ordered, tagged for")
+        policy.append("delegation, and written so the context packer can map each task to the relevant")
+        policy.append("design sections, specs, repo references, and verification command.")
+        policy.append("Do not run implementation delegates during propose; only prepare the work queue")
+        policy.append("and context boundaries that apply will consume.")
+        policy.append("")
         policy.append(f"When implementation is ready, {primary_agent} SHALL:")
-        policy.append(f"1. Package the apply request using implementation-draft or test-draft templates.")
-        policy.append(f"2. For multi-task apply, open one change worktree `chg/<change-name>` from HEAD as"
+        policy.append(f"1. Use the `trly-apply` skill automatically from OpenSpec apply workflows.")
+        policy.append(f"2. Package the apply request using implementation-draft or test-draft templates.")
+        policy.append(f"3. For multi-task apply, open one change worktree `chg/<change-name>` from HEAD as"
                       f"   the integration sandbox; single trivial delegations may skip this and use one"
                       f"   isolated task branch directly.")
-        policy.append(f"3. Delegate each implementation or test task to apply chain (primary: {primary_apply})"
+        policy.append(f"4. Delegate each implementation or test task to apply chain (primary: {primary_apply})"
                       f"   with `trly run --target <agent> --prompt-file <packet> --isolate --base <ref>`.")
-        policy.append(f"4. `--isolate` runs the delegate in an ephemeral git worktree on a throwaway"
+        policy.append(f"5. `--isolate` runs the delegate in an ephemeral git worktree on a throwaway"
                       f"   branch `tr/<task-id>` with `git push` disabled; `--base` points at the change"
                       f"   branch tip so dependent tasks see previously accepted work.")
-        policy.append(f"5. Apply is phased: develop and commit onto task branches, merge accepted task"
+        policy.append(f"6. Apply is phased: develop and commit onto task branches, merge accepted task"
                       f"   branches back into `chg/<change-name>`, run disjoint test delegations from the"
                       f"   accumulated change branch, then run primary integration tests in the change"
                       f"   worktree before a single final merge to the real branch.")
-        policy.append(f"6. {primary_agent} reviews each branch diff before merge and marks tasks complete"
+        policy.append(f"7. {primary_agent} reviews each branch diff before merge and marks tasks complete"
                       f"   only after the accepted work is integrated. An empty branch fails loudly (no"
                       f"   silent success).")
         policy.append("")
@@ -391,12 +404,22 @@ def install_skill_bundle(
     templates_dir.mkdir(exist_ok=True)
     _copy_templates(templates_dir)
     _copy_personas(bundle_root / "personas")
+    if "review" in features and reviewers:
+        _install_review_skill_bundle(skill_root)
+    else:
+        _remove_named_skill_bundle(skill_root, REVIEW_SKILL_NAME)
+    if "apply" in features and apply_chain:
+        _install_apply_skill_bundle(skill_root)
+    else:
+        _remove_named_skill_bundle(skill_root, APPLY_SKILL_NAME)
     _remove_named_skill_bundle(skill_root, LEGACY_SKILL_NAME)
 
 
 def remove_skill_bundle(skill_root: Path) -> bool:
     """Remove task-relay managed skill directories. Returns True if any were removed."""
     removed = _remove_named_skill_bundle(skill_root, SKILL_NAME)
+    removed = _remove_named_skill_bundle(skill_root, REVIEW_SKILL_NAME) or removed
+    removed = _remove_named_skill_bundle(skill_root, APPLY_SKILL_NAME) or removed
     removed = _remove_named_skill_bundle(skill_root, LEGACY_SKILL_NAME) or removed
     return removed
 
@@ -466,42 +489,45 @@ def _build_skill_md(
     if "review" in features and reviewers:
         lines.append("#### Review")
         lines.append("")
-        lines.append("Use review during the OpenSpec propose phase:")
+        lines.append("When review is enabled, OpenSpec propose workflows invoke `$trly-review`")
+        lines.append("after proposal artifacts are written. OpenSpec explore remains primary-only.")
+        lines.append("")
+        lines.append("The review command is:")
         lines.append("")
         lines.append("```bash")
         lines.append("trly review-gate --change <change>")
         lines.append("```")
         lines.append("")
-        lines.append("The review gate runs reviewers in parallel, arbiters in order, validates")
-        lines.append("JSON artifacts, and writes a merged `openspec/changes/<change>/review/delegation_review.md` summary.")
+        lines.append("`$trly-review` owns the full review workflow, including applying arbiter")
+        lines.append("revision contracts and reporting reviewer/arbiter output.")
         lines.append("")
     if "apply" in features and apply_chain:
         primary_apply = apply_chain[0][0]
         lines.append("#### Apply")
         lines.append("")
-        lines.append("Use apply during implementation or test drafting:")
+        lines.append("When apply is enabled, OpenSpec propose workflows prepare delegate-ready")
+        lines.append("tasks before implementation begins: each task should be granular, ordered,")
+        lines.append("tagged for delegation, and written so the context packer can map it to the")
+        lines.append("relevant design sections, specs, repo references, and verification command.")
+        lines.append("Do not run implementation delegates during propose.")
+        lines.append("")
+        lines.append("When apply is enabled, OpenSpec apply workflows invoke `$trly-apply` for")
+        lines.append("delegated implementation or test drafting. The underlying command is:")
         lines.append("")
         lines.append("```bash")
         lines.append("trly apply --change <change> --task <task-id>")
         lines.append("```")
         lines.append("")
-        lines.append("This high-level command packages the packet, uses the configured apply")
-        lines.append("chain, runs the delegate in an isolated worktree, fails loudly on empty")
-        lines.append("output, and prints a branch diff summary.")
+        lines.append("`$trly-apply` owns the full apply workflow, including branch diff review,")
+        lines.append("verification, and integration handoff.")
         lines.append("")
-        lines.append("Lower-level fallback:")
+        lines.append("Lower-level commands remain available for diagnostics and custom workflows:")
         lines.append("")
         lines.append("```bash")
         lines.append("trly pack --mode implementation-draft --change <change> --task <task-id> --out <packet>")
         lines.append(f"trly run --target {primary_apply} --prompt-file <packet> --isolate --base <base-ref>")
         lines.append("```")
         lines.append("")
-        lines.append("For test packets, use `--mode test-draft` and add `--diff-from` or")
-        lines.append("`--diff-file` when dynamic changed-file context is needed. `--isolate`")
-        lines.append("runs the delegate in an ephemeral git worktree on a throwaway `tr/<id>`")
-        lines.append("branch with `git push` disabled. The primary agent reviews and integrates")
-        lines.append("accepted branch diffs, runs final verification, and only then marks")
-        lines.append("OpenSpec tasks complete.")
         lines.append("")
 
     lines.append("### Post-Install Validation")
@@ -532,6 +558,189 @@ def _build_skill_md(
     lines.append("Return only the requested output. Do not modify OpenSpec state or mark tasks complete.")
 
     return "\n".join(lines)
+
+
+def _install_review_skill_bundle(skill_root: Path) -> None:
+    bundle_root = skill_root / REVIEW_SKILL_NAME
+    if bundle_root.exists():
+        shutil.rmtree(bundle_root)
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    bundle_root.joinpath("SKILL.md").write_text(_build_review_skill_md(), encoding="utf-8")
+    agents_dir = bundle_root / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    agents_dir.joinpath("openai.yaml").write_text(
+        "\n".join([
+            "interface:",
+            '  display_name: "trly review"',
+            '  short_description: "Task Relay post-propose review"',
+            '  default_prompt: "Use $trly-review to review an OpenSpec change before apply."',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+
+def _install_apply_skill_bundle(skill_root: Path) -> None:
+    bundle_root = skill_root / APPLY_SKILL_NAME
+    if bundle_root.exists():
+        shutil.rmtree(bundle_root)
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    bundle_root.joinpath("SKILL.md").write_text(_build_apply_skill_md(), encoding="utf-8")
+    agents_dir = bundle_root / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    agents_dir.joinpath("openai.yaml").write_text(
+        "\n".join([
+            "interface:",
+            '  display_name: "trly apply"',
+            '  short_description: "Run Task Relay delegated apply"',
+            '  default_prompt: "Use $trly-apply to apply an OpenSpec task with Task Relay delegation."',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+
+def _build_apply_skill_md() -> str:
+    lines = [
+        "---",
+        f"name: {APPLY_SKILL_NAME}",
+        "description: Task Relay delegated apply workflow for OpenSpec implementation or test tasks. Use during OpenSpec apply when Task Relay apply is enabled, or when the user asks to run trly apply / invoke $trly-apply; do not use for proposal review.",
+        "---",
+        "",
+        "# Trly Apply",
+        "",
+        "## Workflow",
+        "",
+        "Use this skill in two phases when Task Relay apply is enabled:",
+        "",
+        "1. During OpenSpec propose, prepare delegate-ready tasks and context-packer boundaries.",
+        "2. During OpenSpec apply, run delegated implementation or test drafting.",
+        "",
+        "## Propose Preparation",
+        "",
+        "Do not run implementation delegates during propose. Instead, make sure the OpenSpec",
+        "artifacts create a usable apply queue:",
+        "",
+        "- `tasks.md` has granular, ordered task ids that can be delegated independently.",
+        "- Implementation tasks are tagged for the apply chain, for example `[delegate:<agent>]`.",
+        "- Test-authoring tasks are tagged `[delegate:test]` when they should be delegated separately.",
+        "- Each task points to the relevant design section, spec capability, repo area, and expected verification command.",
+        "- Dependencies between tasks are explicit so apply can sequence isolated worktrees safely.",
+        "- Context-packer inputs are discoverable from task text, design headings, spec headings, and any extra repo references.",
+        "",
+        "If those artifacts are missing, revise the proposal artifacts before apply; otherwise",
+        "`trly apply` has no bounded task to package and delegate.",
+        "",
+        "## Apply Execution",
+        "",
+        "When Task Relay apply is enabled, OpenSpec apply workflows should invoke this skill automatically.",
+        "If the change has a prior `REVISE` review result, do not proceed unless revision",
+        "verification reports `apply_ready: true`.",
+        "",
+        "Run the high-level apply command:",
+        "",
+        "```bash",
+        "trly apply --change <change> --task <task-id>",
+        "```",
+        "",
+        "For test drafting:",
+        "",
+        "```bash",
+        "trly apply --change <change> --task <task-id> --mode test-draft",
+        "```",
+        "",
+        "Useful options:",
+        "",
+        "- `--read <path>`: inline extra repo context; repeatable.",
+        "- `--diff-from <ref>` or `--diff-file <path>`: include dynamic changed-file context for test drafting.",
+        "- `--verify-cmd \"<command>\"`: run verification in a temporary worktree based on the delegated branch.",
+        "- `--base <ref>`: branch the isolated delegate worktree from a specific base.",
+        "",
+        "## Responsibilities",
+        "",
+        "The primary agent must review the delegated branch diff before integration. Mark",
+        "OpenSpec tasks complete only after accepted work is integrated and verified.",
+        "",
+        "Apply delegates must not modify OpenSpec state, mark task checkboxes, or make",
+        "architecture, security, credential, migration, or destructive-operation decisions.",
+        "",
+        "## Report",
+        "",
+        "After apply completes, report:",
+        "",
+        "- delegated branch name",
+        "- diff summary",
+        "- verification result, if any",
+        "- whether the branch is ready for primary integration",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_review_skill_md() -> str:
+    lines = [
+        "---",
+        f"name: {REVIEW_SKILL_NAME}",
+        "description: Task Relay review workflow for OpenSpec changes. Use after OpenSpec propose when Task Relay review is enabled, or when the user asks to run trly review / review-gate / $trly-review before apply; do not use for openspec explore.",
+        "---",
+        "",
+        "# Trly Review",
+        "",
+        "## Workflow",
+        "",
+        "Run this skill after OpenSpec propose when Task Relay review is enabled. The normal OpenSpec path is:",
+        "",
+        "```text",
+        "openspec.explore -> openspec.propose -> trly-review -> openspec.apply",
+        "```",
+        "",
+        "Run the configured review gate:",
+        "",
+        "```bash",
+        "trly review-gate --change <change>",
+        "```",
+        "",
+        "The gate runs reviewers in parallel, runs arbiters in order, validates JSON",
+        "artifacts, and writes:",
+        "",
+        "- `openspec/changes/<change>/review/delegation_review.md`",
+        "- `openspec/changes/<change>/review/delegation_review_result.json`",
+        "- reviewer JSON artifacts",
+        "- arbiter JSON artifacts",
+        "",
+        "## Decisions",
+        "",
+        "- `APPROVE`: do not edit OpenSpec artifacts. Report reviewer opinions and arbiter decision; review is complete and apply may proceed.",
+        "- `REJECT`: do not edit OpenSpec artifacts. Report reviewer opinions and arbiter reasons; stop before apply.",
+        "- `REVISE`: the primary agent must apply only the arbiter-adjudicated `actionable_items` before apply.",
+        "",
+        "For `REVISE`:",
+        "",
+        "1. Read `openspec/changes/<change>/review/delegation_review_result.json`.",
+        "2. Read the listed reviewer and arbiter artifacts.",
+        "3. Update only the named target artifacts, such as `proposal.md`, `design.md`, `tasks.md`, or `specs/**/spec.md`.",
+        "4. Follow the arbiter contract exactly. Do not re-arbitrate reviewer conflicts and do not adopt unadjudicated reviewer suggestions.",
+        "5. Run revision verification:",
+        "",
+        "```bash",
+        "trly review-gate --change <change> --verify-revision",
+        "```",
+        "",
+        "Only treat review as complete when verification reports `apply_ready: true`.",
+        "",
+        "## Report",
+        "",
+        "After review completes, report:",
+        "",
+        "- final decision",
+        "- reviewer verdicts and concise findings",
+        "- arbiter decision summaries",
+        "- for `REVISE`, which OpenSpec artifacts the primary agent modified",
+        "- verification result",
+        "- whether apply may proceed",
+        "",
+        "Do not run `trly apply` from this skill unless the user explicitly asks to continue.",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _write_agent_configs(

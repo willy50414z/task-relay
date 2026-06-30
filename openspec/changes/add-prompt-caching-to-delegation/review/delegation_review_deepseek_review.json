@@ -1,0 +1,85 @@
+{
+  "reviewer": "deepseek:/review",
+  "verdict": "CONCERNS",
+  "summary": "提案方向正確，text marker 方案務實且向後相容，但存在數個會阻礙實作的關鍵缺口：模板與 static content 的分離邊界未定義、cache 節省公式有誤、AgentUsage 型別未規劃擴充、marker escape 邏輯有 bug、以及 proposal/design/tasks 三者對 --cache flag 的決策互相矛盾。建議先解決這些再進入實作。",
+  "findings": [
+    {
+      "severity": "critical",
+      "area": "architecture",
+      "description": "SDK runner 的 `_extract_template()` (task 2.5) 需要從 static portion 中分離出模板內容以放入 system prompt，但 packet 的 static portion 是模板 + spec + design 三段內容的直接串接，之間沒有任何 marker 或分隔標記。Runner 無法可靠判斷模板的結束邊界——目前的 packer 不做任何標記，`build_packet()` 直接 `plan.template.rstrip()` 然後 append sections。若邊界判斷錯誤，部分 spec 內容會被錯誤地移入 system prompt，或模板殘留在 user message 中導致重複計費。",
+      "recommendation": "在 packet cache layout 中增加第二個 marker（例如 `<!-- trly:template_end -->`）標記模板與 spec/design 的邊界；或改為在 static portion 中對模板使用明確的 XML 包裹標籤（如 `<template>...</template>`），讓 runner 可透過標籤而非啟發式規則分離。"
+    },
+    {
+      "severity": "critical",
+      "area": "tests",
+      "description": "specs/packet-cache-benchmarking/spec.md 定義的節省公式 `(static_byte_count / 4) * (1 - 0.1) * cache_hit_count` 存在兩個根本錯誤：(1) Anthropic tokenization 不等於 `byte_count / 4`，對中文/多語言內容誤差可達 2-3 倍，`cache_write_tokens` 才是真正的寫入 token 數；(2) 公式假設 byte_count 可再生，但 cache read 的折扣是基於實際 token count，不是 byte 估算。公式應為 `cache_write_tokens * 0.9 * cache_hit_count`（cache read 享有 90% 折扣）。",
+      "recommendation": "修正 spec 中的 Savings calculation scenario，改用 `cache_write_tokens * 0.9 * cache_hit_count` 的公式。若需要無 API 呼叫時的估算值，備註說明其為粗略估計且實際節省量以 API response 的 usage 欄位為準。"
+    },
+    {
+      "severity": "critical",
+      "area": "architecture",
+      "description": "設計規劃將 `cache_creation_input_tokens` 和 `cache_read_input_tokens` 放入 `AgentRunResult.usage`，但 `AgentUsage` dataclass（types.py:55-59）是 frozen 且只有 `input_tokens`、`output_tokens`、`cost_usd` 三個欄位。tasks.md 完全沒有規劃更新此型別的任務，若強行塞入會導致 type checker 報錯或 runtime attribute error。",
+      "recommendation": "在 tasks.md 中新增任務：擴充 `AgentUsage` dataclass，新增 `cache_creation_input_tokens: int | None = None` 與 `cache_read_input_tokens: int | None = None` 欄位，並確認所有現有 runner 的 usage 建構處不受影響（欄位有預設值，向後相容）。"
+    },
+    {
+      "severity": "critical",
+      "area": "qa",
+      "description": "Task 1.3 的 marker escape 邏輯有 bug：將 `<!-- trly:cache_break -->` 替換為 `<!-- trly:cache_break_escaped -->` 後，escape 後的字串仍然包含 `trly:cache_break` 子字串。SDK runner 若使用 `in` 運算子或 regex `/<!-- trly:cache_break -->/` 來尋找 marker，不會誤匹配（因為周圍語境不同），但若使用較寬鬆的 `'trly:cache_break' in prompt` 檢查就會誤判。問題在於 escape 目標是防止「內容本身包含完整 marker」，但 escape 產物仍攜帶相同關鍵字，削弱了防禦力。",
+      "recommendation": "將 escape 目標改為不含原始 marker 子字串的形式，例如 HTML entity 編碼（`&lt;!-- trly:cache_break --&gt;`）或使用完全不同的替代字串（如 `[trly:cache_break_removed]`）。同時在 SDK runner 端統一使用精確的完整 marker 字串匹配（含前後 `<!--` 和 `-->`），避免子字串誤判。"
+    },
+    {
+      "severity": "high",
+      "area": "scope",
+      "description": "proposal.md 聲稱「trly pack 與 trly apply 在連續委派時自動啟用 caching（同 change + 同 mode 且在上次委派 5 分鐘內）」，但 design.md 將此列為 Open Question（「是否需要在 trly apply 層級自動偵測連續委派同 change 並自動啟用 cache layout？還是讓呼叫者自行決定？」）。這兩個文件對同一功能點的狀態互相矛盾，且沒有任何 spec 或 task 涵蓋自動偵測邏輯的實作。",
+      "recommendation": "決定 auto-detection 的歸屬：若由 primary agent（task-relay 的呼叫者）負責判斷是否啟用 cache layout，則從 proposal 中移除自動啟用的描述，並在 design 中明確說明這是 caller 的責任。若由 task-relay 自己偵測，則需補充 spec 和 tasks 來定義 session tracking 機制（如何記住上次委派時間和 change）。"
+    },
+    {
+      "severity": "high",
+      "area": "scope",
+      "description": "proposal.md Impact 區塊寫「trly pack CLI 可能新增 --cache flag」，tasks.md 1.5 具體指定要「透過 --cache flag 啟用」，但 design.md Decision #5 明確決定「不新增 --cache flag。當使用 claude-sdk target 且 packet 包含 cache marker 時，自動啟用 caching」。三方文件對 CLI 介面的設計決策互相矛盾，無法據此實作。",
+      "recommendation": "統一決策並更新所有文件。建議採用 design.md 的方案（cache 為 SDK runner 內建行為，不需要獨立 flag），因為它減少 CLI 參數數量且語義更清晰——cache 是傳輸層的最佳化，不應是 packet 的屬性。若採用此方案，需從 proposal.md 和 tasks.md 中移除 --cache flag 的引用，並在 tasks 1.5 改為「確認 handle_pack 將 cache_layout 參數傳遞給 build_packet」，而非新增 flag。"
+    },
+    {
+      "severity": "high",
+      "area": "architecture",
+      "description": "Design Decision #1 選擇 text marker 方案的理由之一是「text marker 對 CLI runner 完全透明（它只是一行 HTML 註解）」，但這忽略了一個事實：cache layout 不僅僅是插入 marker，還重新排列了 packet 的內容順序。現有 flat layout 是 template → scope note → budget note → repo refs → sections；cache layout 變成 template + specs + design → marker → task block + scope note + budget note + repo refs + extra reads。Scope note、budget note、repo refs 的位置從前方移到後方，對所有 runner（含 CLI）都會改變 prompt 的內容組織。雖然不預期會造成功能性問題，但宣稱「完全透明」不準確。",
+      "recommendation": "更新 design.md 的 Decision #1，明確承認 cache layout 會改變所有 runner 看到的 prompt 結構（不只是插入 marker），並說明這個重新排列不會影響 delegation 結果的理由（所有資訊仍在 prompt 中，只是順序不同）。在測試中增加對非 SDK runner + cache layout packet 的 regression 測試。"
+    },
+    {
+      "severity": "medium",
+      "area": "architecture",
+      "description": "`_run_with_fallback()` (core.py:275) 的 fallback 機制會在 agent 失敗時切換到下一個 target（例如 claude-sdk → claude）。若 fallback 發生，即使首次 claude-sdk 請求已將 static content 寫入 Anthropic server-side cache，fallback 後的 CLI runner 也無法利用該 cache（因為是不同的 API client）。cache 寫入成本（全價 input tokens）等於白費。proposal.md 的 Impact 區塊提及 core.py 需要感知 caching 語義，但 tasks.md 完全沒有對應的實作任務。",
+      "recommendation": "在 tasks.md 中增加任務：定義 `_run_with_fallback` 的 cache 語義——至少在 trace log 中記錄 cache write 發生後 fallback 的狀況，以便觀測 cache waste。若需要更積極的處理，可考慮在 fallback 時記錄「cache 寫入已發生但未命中」的 metrics。"
+    },
+    {
+      "severity": "medium",
+      "area": "tests",
+      "description": "Task 4.3（multi-task sequential delegation benchmark）和 task 5.8（integration test: 兩次連續 delegation 驗證 cache hit）都需要實際呼叫 Anthropic API 才能取得 cache hit/miss 的真實數據。這表示：(1) CI 環境需要有效的 ANTHROPIC_API_KEY；(2) 每次 CI 執行都會產生 API 費用；(3) 若 API 不可用則這些測試無法執行。目前沒有規劃 mock 或 record/replay 策略。",
+      "recommendation": "為 benchmark 和 integration test 設計兩層策略：(a) 單元測試層使用 mock（mock `anthropic.Anthropic().messages.create()` 的回傳值，包含假的 usage.cache_* 欄位）；(b) 整合測試層使用 record/replay（VCR-style，錄製一次真實 API response 後重播），或將需要真實 API 的測試標記為 manual-only。在 tasks.md 中明確區分哪些測試可以 mock、哪些需要真實 API。"
+    },
+    {
+      "severity": "medium",
+      "area": "architecture",
+      "description": "Task 2.4 的描述「將 static blocks 轉為帶 cache_control 的 content blocks」使用複數（blocks），但 design.md 的 API request 結構圖顯示 messages 中只有兩個 user content blocks：第一個是 spec+design（帶 cache_control），第二個是 task block+notes+refs（不帶 cache_control）。加上 system prompt（模板，帶 cache_control），總共只有兩個 cache_control 標記點，而非多個。若 task 2.4 的意圖是把每個 static section 都變成獨立 content block 且各自帶 cache_control，這會產生多個 cache breakpoint，與 design 不符。",
+      "recommendation": "釐清 task 2.4 的意圖：若目的是將 static portion 作為單一 content block 附加 cache_control（與 design 一致），則修正 task 描述為「將整個 static portion 作為單一 content block 附加 cache_control」。若目的是多個獨立 cache_control block（例如 system prompt 一個 + user message static 部分一個），則需要在 design 中明確討論為何需要多個 breakpoint 及其 trade-off。"
+    },
+    {
+      "severity": "medium",
+      "area": "qa",
+      "description": "Proposal 的 primary motivation 是「同一個 OpenSpec change 內有多個 task 需要依序委派」的場景，但檢視 task-relay 的程式碼後發現：`run()` 和 `run_isolated()` 都是 single-shot delegation，沒有內建的「iterate over tasks of the same change」迴圈。多 task 連續委派的 orchestration 邏輯存在於 task-relay 的呼叫者（primary agent），而非 task-relay 本身。這不影響 cache 機制的正當性，但意味著 cache 的實際命中率取決於外部呼叫者的行為，而 task-relay 無法控制呼叫者是否真的在 5 分鐘 TTL 內連續委派同 change 的多個 task。",
+      "recommendation": "在 proposal 或 design 中明確說明：cache 的價值取決於 primary agent 的使用模式，task-relay 本身提供機制但不保證命中率。若需要最大化 cache 效益，可能需要提供 guidance 給 primary agent 的開發者（例如建議同 change 的 tasks 應連續委派而非交錯）。此為觀測項目，不阻擋實作。"
+    },
+    {
+      "severity": "low",
+      "area": "scope",
+      "description": "specs/packet-cache-layout/spec.md 的 requirement「Template instructions SHALL be moved to cacheable position」描述模板需要被移到 cache breakpoint 之前。但檢視 `build_packet()` 現有實作（packer.py:1171），模板本來就是 packet 的第一個元素（`parts = [plan.template.rstrip()]`），它已經在最前面。這個 requirement 的文字暗示需要改變模板位置，但實際上不需要。真正需要的是讓 SDK runner 能從 static portion 中識別並提取模板以放入 system prompt，這是 runner 的責任而非 packer 的責任。",
+      "recommendation": "將此 requirement 重新措辭為「Template content SHALL be identifiable within the static portion so the SDK runner can extract it for the system prompt」，並將相關 scenario 移到 sdk-cache-runner spec 中。或在 packer spec 中明確定義模板與 spec/design 之間的分隔標記（呼應 critical finding #1）。"
+    },
+    {
+      "severity": "low",
+      "area": "scope",
+      "description": "Tasks.md 中各 task 之間沒有標記相依關係（blockedBy/blocks）。實際上 task 2.5（`_extract_template()`）依賴 task 1.2（cache layout 定義模板與 spec 的邊界），task 4 依賴 task 1 和 2 的完成，task 5 依賴所有其他 task。缺少明確的相依標記可能導致實作順序錯誤。",
+      "recommendation": "在 tasks.md 中為每個 task 加上 `depends_on` 或類似標記，或在 task 描述中用文字說明前置依賴。最低限度應確保 reader 知道 section 2 的部分 tasks（尤其是 2.5）需要在 section 1 完成後才能開始。"
+    }
+  ]
+}

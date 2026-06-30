@@ -36,6 +36,7 @@ def handle_pack(args: Namespace) -> int:
                 change=args.change,
                 task=args.task,
                 full_change_context=getattr(args, "full_change_context", False),
+                cache_layout_enabled=getattr(args, "cache_layout", False),
             ),
             ensure_ascii=False,
             indent=2,
@@ -43,7 +44,7 @@ def handle_pack(args: Namespace) -> int:
         sys.stdout.write("\n")
         return 0
 
-    packet = build_packet(**common)
+    packet = build_packet(**common, cache_layout=getattr(args, "cache_layout", False))
     if args.out:
         Path(args.out).write_text(packet, encoding="utf-8")
         sys.stderr.write(f"[task-relay] packet written to {args.out}\n")
@@ -74,7 +75,13 @@ def handle_pack_lint(args: Namespace) -> int:
         cwd=args.cwd,
         full_change_context=False,
     )
-    report = plan.to_report(mode=args.mode, change=args.change, task=args.task, full_change_context=False)
+    report = plan.to_report(
+        mode=args.mode,
+        change=args.change,
+        task=args.task,
+        full_change_context=False,
+        cache_layout_enabled=getattr(args, "cache_layout", False),
+    )
     diagnostics: list[dict[str, object]] = []
     for signal in report["missing_signals"]:
         diagnostics.append({"severity": "warning", "code": "missing_signal", "detail": signal})

@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from task_relay import agents
+from task_relay import jobs
 from task_relay.errors import AgentExecutionError, AgentQuotaError, DelegationOutputError, DirtyWorkingTreeError
 from task_relay.prompt import build_prompt
 from task_relay.resolver import resolve
@@ -13,6 +14,10 @@ from task_relay.types import AgentRunRequest, AgentRunResult, JobResult, Outcome
 from task_relay.workspace import cleanup_workspace, create_workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _trace_usage_value(value):
+    return value if isinstance(value, (int, float)) else None
 
 
 def run(
@@ -49,6 +54,52 @@ def run(
     if expect_output:
         verify_expected_output(expect_output, cwd=cwd)
     return result.stdout
+
+
+def run_background(
+    target: str | None = None,
+    prompt: str = "",
+    *,
+    targets: list[str] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    timeout: float = 1800,
+    cwd: str | None = None,
+) -> str:
+    if target is not None and targets is not None:
+        raise ValueError("Provide either 'target' or 'targets', not both.")
+    selected = targets if targets is not None else ([target] if target is not None else [])
+    if not selected:
+        raise ValueError("run_background() requires 'target' or 'targets'.")
+    if len(selected) != 1:
+        raise ValueError("background run does not support fallback targets in this version.")
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty.")
+
+    name = selected[0]
+    runner = agents.resolve(name)
+    if not hasattr(runner, "build_command"):
+        # Manual background execution is intentionally narrow: only adapters that
+        # expose a raw command contract can be started without a supervising caller.
+        raise ValueError(f"target {name} does not support background execution")
+    command, env, resolved_model = runner.build_command(  # type: ignore[attr-defined]
+        prompt=prompt,
+        cwd=cwd,
+        model=model,
+        effort=effort,
+    )
+    record = jobs.start_background(
+        jobs.JobSpec(
+            command=command,
+            stdin_input=prompt,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            target=name,
+            model=resolved_model,
+        )
+    )
+    return record.job_id
 
 
 def run_isolated(
@@ -110,8 +161,11 @@ def run_isolated(
         wt.remove_worktree(repo_root, worktree_path, branch, keep_branch=True)
 
     if not had_changes:
+        detail = ""
+        if result.job_id or result.log_path:
+            detail = f" job_id={result.job_id or '-'} log={result.log_path or '-'}"
         raise DelegationOutputError(
-            f"delegation produced no changes (branch {branch} is empty)."
+            f"delegation produced no changes (branch {branch} is empty).{detail}"
         )
     return result.stdout, branch
 
@@ -257,6 +311,8 @@ def _normalize_agent_run_result(
             stdout=str(stdout),
             target=str(resolved_target),
             model=request.model if request is not None else None,
+            job_id=getattr(result, "job_id", None),
+            log_path=getattr(result, "log_path", None),
         )
 
     stdout = getattr(result, "stdout", result)
@@ -269,6 +325,8 @@ def _normalize_agent_run_result(
         model=getattr(result, "model", None) or (request.model if request is not None else None),
         retries=int(getattr(result, "retries", 0) or 0),
         usage=getattr(result, "usage", None),
+        job_id=getattr(result, "job_id", None),
+        log_path=getattr(result, "log_path", None),
     )
 
 
@@ -287,7 +345,14 @@ def _run_with_fallback(
     for index, name in enumerate(targets):
         is_last = index == len(targets) - 1
         wait_on_hard = True if is_last else not fast_fallback
-        attempt = replace(request, wait_on_hard_quota=wait_on_hard, session=session)
+        attempt = replace(
+            request,
+            wait_on_hard_quota=wait_on_hard,
+            session=session,
+            role=prompt_context.get("role"),
+            change=prompt_context.get("change"),
+            task=prompt_context.get("task"),
+        )
         level = _log_level()
         logger.log(level, "delegation start: target=%s role=%s branch=%s", name, prompt_context.get("role"), request.branch)
         start = time.monotonic()
@@ -371,6 +436,10 @@ def _write_trace(
         "tokens_in": usage.input_tokens if usage else None,
         "tokens_out": usage.output_tokens if usage else None,
         "cost_usd": usage.cost_usd if usage else None,
+        "cache_creation_input_tokens": _trace_usage_value(getattr(usage, "cache_creation_input_tokens", None)) if usage else None,
+        "cache_read_input_tokens": _trace_usage_value(getattr(usage, "cache_read_input_tokens", None)) if usage else None,
         "retries": result.retries if result is not None else 0,
+        "job_id": result.job_id if result is not None else None,
+        "log_path": result.log_path if result is not None else None,
     }
     append_trace_record(record, cwd=request.cwd)

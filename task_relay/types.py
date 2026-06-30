@@ -50,6 +50,10 @@ class AgentRunRequest:
     branch: str | None = None
     # Stable session id for per-delegation trace records.
     session: str | None = None
+    # Prompt-derived job context for logs, trace, and jobs CLI display.
+    role: str | None = None
+    change: str | None = None
+    task: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,8 @@ class AgentUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,8 @@ class AgentRunResult:
     model: str | None = None
     retries: int = 0
     usage: AgentUsage | None = None
+    job_id: str | None = None
+    log_path: str | None = None
 
     def __iter__(self):
         yield self.stdout

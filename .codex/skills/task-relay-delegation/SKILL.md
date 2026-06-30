@@ -33,40 +33,42 @@ chain target with the packet file.
 
 #### Review
 
-Use review during the OpenSpec propose phase:
+When review is enabled, OpenSpec propose workflows invoke `$trly-review`
+after proposal artifacts are written. OpenSpec explore remains primary-only.
+
+The review command is:
 
 ```bash
 trly review-gate --change <change>
 ```
 
-The review gate runs reviewers in parallel, arbiters in order, validates
-JSON artifacts, and writes a merged `openspec/changes/<change>/review/delegation_review.md` summary.
+`$trly-review` owns the full review workflow, including applying arbiter
+revision contracts and reporting reviewer/arbiter output.
 
 #### Apply
 
-Use apply during implementation or test drafting:
+When apply is enabled, OpenSpec propose workflows prepare delegate-ready
+tasks before implementation begins: each task should be granular, ordered,
+tagged for delegation, and written so the context packer can map it to the
+relevant design sections, specs, repo references, and verification command.
+Do not run implementation delegates during propose.
+
+When apply is enabled, OpenSpec apply workflows invoke `$trly-apply` for
+delegated implementation or test drafting. The underlying command is:
 
 ```bash
 trly apply --change <change> --task <task-id>
 ```
 
-This high-level command packages the packet, uses the configured apply
-chain, runs the delegate in an isolated worktree, fails loudly on empty
-output, and prints a branch diff summary.
+`$trly-apply` owns the full apply workflow, including branch diff review,
+verification, and integration handoff.
 
-Lower-level fallback:
+Lower-level commands remain available for diagnostics and custom workflows:
 
 ```bash
 trly pack --mode implementation-draft --change <change> --task <task-id> --out <packet>
 trly run --target codex --prompt-file <packet> --isolate --base <base-ref>
 ```
-
-For test packets, use `--mode test-draft` and add `--diff-from` or
-`--diff-file` when dynamic changed-file context is needed. `--isolate`
-runs the delegate in an ephemeral git worktree on a throwaway `tr/<id>`
-branch with `git push` disabled. The primary agent reviews and integrates
-accepted branch diffs, runs final verification, and only then marks
-OpenSpec tasks complete.
 
 ### Post-Install Validation
 

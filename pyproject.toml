@@ -9,6 +9,7 @@ description = "Structured agent task runner with outcome routing via file signal
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.57,<1",
     "questionary>=2,<3",
 ]
 

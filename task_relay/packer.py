@@ -40,6 +40,8 @@ _STOPWORDS = {
     "is", "it", "of", "on", "or", "so", "that", "the", "this", "to", "when", "with",
     "done", "develop", "option", "land", "against", "current", "code", "now",
 }
+CACHE_BREAK_MARKER = "<!-- trly:cache_break -->"
+TEMPLATE_END_MARKER = "<!-- trly:template_end -->"
 
 
 @dataclass(frozen=True)
@@ -175,12 +177,24 @@ class PacketPlan:
         refs = sum(ref.byte_count for ref in self.repo_references)
         return header + note + body + labels + refs
 
-    def to_report(self, *, mode: str, change: str, task: str | None, full_change_context: bool) -> dict[str, object]:
+    def to_report(
+        self,
+        *,
+        mode: str,
+        change: str,
+        task: str | None,
+        full_change_context: bool,
+        cache_layout_enabled: bool = False,
+    ) -> dict[str, object]:
+        static_byte_count, dynamic_byte_count = _cache_layout_byte_counts(self) if cache_layout_enabled else (None, None)
         return {
             "mode": mode,
             "change": change,
             "task": task,
             "full_change_context": full_change_context,
+            "cache_layout_enabled": cache_layout_enabled,
+            "static_byte_count": static_byte_count,
+            "dynamic_byte_count": dynamic_byte_count,
             "selection_mode": self.selection_mode,
             "scope_note": self.scope_note,
             "fallback_reason": self.fallback_reason,
@@ -222,8 +236,87 @@ def _inline(label: str, text: str) -> str:
     return f"### {label}\n\n```\n{text.rstrip()}\n```"
 
 
+def _escape_cache_marker_text(text: str) -> str:
+    return (
+        text.replace(CACHE_BREAK_MARKER, "&lt;!-- trly&#58;cache_break --&gt;")
+        .replace(TEMPLATE_END_MARKER, "&lt;!-- trly&#58;template_end --&gt;")
+    )
+
+
+def _trace_usage_value(value: object) -> int | float | None:
+    return value if isinstance(value, (int, float)) else None
+
+
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _is_static_cache_section(section: PacketSection) -> bool:
+    if section.source.startswith("specs/"):
+        return True
+    if section.source in {"proposal.md", "design.md"}:
+        return True
+    return False
+
+
+def _inline_sections(sections: tuple[PacketSection, ...]) -> list[str]:
+    return [_inline(section.label, _escape_cache_marker_text(section.text)) for section in sections]
+
+
+def _cache_layout_parts(plan: PacketPlan) -> tuple[list[str], list[str]]:
+    static_sections = tuple(section for section in plan.sections if _is_static_cache_section(section))
+    dynamic_sections = tuple(section for section in plan.sections if not _is_static_cache_section(section))
+
+    static_parts = [_escape_cache_marker_text(plan.template.rstrip()), TEMPLATE_END_MARKER]
+    if static_sections:
+        static_parts.append("## Inlined Context")
+        static_parts.extend(_inline_sections(static_sections))
+
+    dynamic_parts: list[str] = []
+    if dynamic_sections:
+        dynamic_parts.append("## Inlined Context" if not static_sections else "## Task Context")
+        dynamic_parts.extend(_inline_sections(dynamic_sections))
+    if plan.scope_note:
+        dynamic_parts.append(f"Scope note: {_escape_cache_marker_text(plan.scope_note)}")
+    if plan.budget_status == "trimmed":
+        dynamic_parts.append(f"Budget note: trimmed optional context to fit {plan.budget_limit_bytes} bytes.")
+    if plan.repo_references:
+        dynamic_parts.append("## Referenced Repo Context")
+        dynamic_parts.extend(
+            f"- `{ref.path}` ({_escape_cache_marker_text(ref.reason)}; source: {ref.source})"
+            for ref in plan.repo_references
+        )
+    return static_parts, dynamic_parts
+
+
+def _cache_layout_byte_counts(plan: PacketPlan) -> tuple[int, int]:
+    static_parts, dynamic_parts = _cache_layout_parts(plan)
+    static_text = "\n\n".join(static_parts)
+    dynamic_text = "\n\n".join(dynamic_parts)
+    return len(static_text.encode("utf-8")), len(dynamic_text.encode("utf-8"))
+
+
+def _build_flat_packet(plan: PacketPlan) -> str:
+    parts = [_escape_cache_marker_text(plan.template.rstrip())]
+    if plan.scope_note:
+        parts.append(f"Scope note: {_escape_cache_marker_text(plan.scope_note)}")
+    if plan.budget_status == "trimmed":
+        parts.append(f"Budget note: trimmed optional context to fit {plan.budget_limit_bytes} bytes.")
+    if plan.repo_references:
+        parts.append("## Referenced Repo Context")
+        parts.extend(
+            f"- `{ref.path}` ({_escape_cache_marker_text(ref.reason)}; source: {ref.source})"
+            for ref in plan.repo_references
+        )
+    parts.append("## Inlined Context")
+    parts.extend(_inline_sections(plan.sections))
+    return "\n\n".join(parts) + "\n"
+
+
+def _build_cache_packet(plan: PacketPlan) -> str:
+    static_parts, dynamic_parts = _cache_layout_parts(plan)
+    parts = [*static_parts, CACHE_BREAK_MARKER, *dynamic_parts]
+    return "\n\n".join(parts) + "\n"
 
 
 def _heading_match(line: str) -> re.Match[str] | None:
@@ -571,6 +664,8 @@ def _call_model_resolver(
             "tokens_in": usage.input_tokens if usage else None,
             "tokens_out": usage.output_tokens if usage else None,
             "cost_usd": usage.cost_usd if usage else None,
+            "cache_creation_input_tokens": _trace_usage_value(getattr(usage, "cache_creation_input_tokens", None)) if usage else None,
+            "cache_read_input_tokens": _trace_usage_value(getattr(usage, "cache_read_input_tokens", None)) if usage else None,
             "retries": result.retries if result is not None else 0,
             "error": error,
         }, cwd=cwd)
@@ -1142,6 +1237,7 @@ def build_packet(
     model_resolver_enabled: bool = False,
     model_result: dict[str, Any] | None = None,
     model_call_limit: int = 1,
+    cache_layout: bool = False,
 ) -> str:
     plan = plan_packet(
         mode,
@@ -1168,14 +1264,6 @@ def build_packet(
             )
         )
 
-    parts = [plan.template.rstrip()]
-    if plan.scope_note:
-        parts.append(f"Scope note: {plan.scope_note}")
-    if plan.budget_status == "trimmed":
-        parts.append(f"Budget note: trimmed optional context to fit {plan.budget_limit_bytes} bytes.")
-    if plan.repo_references:
-        parts.append("## Referenced Repo Context")
-        parts.extend(f"- `{ref.path}` ({ref.reason}; source: {ref.source})" for ref in plan.repo_references)
-    parts.append("## Inlined Context")
-    parts.extend(_inline(section.label, section.text) for section in plan.sections)
-    return "\n\n".join(parts) + "\n"
+    if cache_layout:
+        return _build_cache_packet(plan)
+    return _build_flat_packet(plan)

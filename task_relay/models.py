@@ -29,12 +29,14 @@ DEEPSEEK_MODELS: list[ModelInfo] = [
 
 AGENT_DEFAULTS: dict[str, str] = {
     "claude": "claude-sonnet-4-6",
+    "claude-sdk": "claude-sonnet-4-6",
     "codex": "gpt-5.5-medium",
     "deepseek": "deepseek-v4-pro[1m]",
 }
 
 _MODEL_REGISTRY: dict[str, list[ModelInfo]] = {
     "claude": CLAUDE_MODELS,
+    "claude-sdk": CLAUDE_MODELS,
     "codex": CODEX_MODELS,
     "deepseek": DEEPSEEK_MODELS,
 }

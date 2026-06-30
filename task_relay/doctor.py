@@ -353,7 +353,33 @@ def _path_checks(
                 scope="path",
                 summary=f"skill bundle path for {agent}/{candidate_scope}",
             ))
+            features = _features_for_path(blocks, agent, candidate_scope)
+            split_skills = []
+            if "review" in features:
+                split_skills.append("trly-review")
+            if "apply" in features:
+                split_skills.append("trly-apply")
+            for skill_name in split_skills:
+                checks.append(_writable_check(
+                    id=f"path.skills:{agent}:{candidate_scope}:{skill_name}",
+                    path=skill_root / skill_name,
+                    scope="path",
+                    summary=f"{skill_name} skill bundle path for {agent}/{candidate_scope}",
+                ))
     return checks
+
+
+def _features_for_path(blocks: list[dict], agent: str, scope: str) -> set[str]:
+    features: set[str] = set()
+    for block in blocks:
+        config = block.get("config") or {}
+        if config.get("primary") != agent:
+            continue
+        block_scope = block.get("scope") or config.get("scope") or "project"
+        if block_scope != scope:
+            continue
+        features.update(config.get("features") or [])
+    return features
 
 
 def _writable_check(*, id: str, path: Path, scope: str, summary: str) -> DoctorCheck:

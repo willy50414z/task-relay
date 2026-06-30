@@ -1,0 +1,122 @@
+{
+  "change": "add-prompt-caching-to-delegation",
+  "decision": "REVISE",
+  "apply_allowed": true,
+  "requires_primary_revision": true,
+  "reviewers": [
+    {
+      "id": "deepseek_review",
+      "path": "/home/willy/code/task-relay/openspec/changes/add-prompt-caching-to-delegation/review/delegation_review_deepseek_review.json",
+      "reviewer": "deepseek:/review",
+      "verdict": "CONCERNS"
+    }
+  ],
+  "arbiters": [
+    {
+      "id": "claude_plan_ceo_review",
+      "path": "/home/willy/code/task-relay/openspec/changes/add-prompt-caching-to-delegation/review/delegation_arbiter_claude_plan_ceo_review.json",
+      "decision": "REVISE",
+      "summary": "提案的產品價值明確（同 change 連續委派的 token 成本最佳化），text-marker 向後相容方案務實，scope 邊界（non-goals）清楚。但三份核心文件對兩個關鍵介面決策互相矛盾（自動啟用 caching、--cache flag），且 spec 內含一條錯誤的節省公式與一個缺漏的型別擴充任務，這些會直接導致實作分歧或產出錯誤數據。需先收斂矛盾並修正 spec 後方可實作。"
+    },
+    {
+      "id": "claude_plan_eng_review",
+      "path": "/home/willy/code/task-relay/openspec/changes/add-prompt-caching-to-delegation/review/delegation_arbiter_claude_plan_eng_review.json",
+      "decision": "REVISE",
+      "summary": "工程可行性方向成立：text-marker 向後相容、SDK runner 為 opt-in、non-goals 清楚，migration plan 有合理的 rollback。但有四個會直接阻擋實作或產出錯誤數據的硬缺陷（模板/spec 邊界無確定性標記導致 _extract_template() 必須啟發式猜測、AgentUsage frozen dataclass 無擴充任務、benchmark 節省公式以 byte/4 估 token 且折扣基礎錯誤、marker escape 產物仍含原關鍵字），加上兩處三方文件對 CLI 介面（--cache flag、自動啟用）互相矛盾無法據以實作。另需補上測試可行性（mock vs 真實 API 分層）與 cache layout 重排內容對所有 runner（含 CLI）的回歸驗證，否則部署安全與 CI 成本無法保證。收斂後可進入實作。"
+    }
+  ],
+  "actionable_items": [
+    {
+      "target_artifact": "proposal.md",
+      "required_change": "解決 proposal 與 design 對「自動啟用 caching」的矛盾：proposal 聲稱 trly pack/apply 在同 change+同 mode 且 5 分鐘內連續委派時自動啟用，但 design 將此列為 Open Question 且無對應 spec/task。採用 design 立場——task-relay 提供機制、由 caller（primary agent）決定是否啟用 cache layout——並從 proposal 移除自動偵測的承諾，明確標註此為呼叫者責任。",
+      "acceptance_criteria": "proposal、design、tasks 三者對「誰負責啟用 cache layout」描述一致；proposal 不再宣稱 task-relay 自動偵測連續委派；若保留自動偵測則必須補上對應 spec requirement 與 session-tracking task。"
+    },
+    {
+      "target_artifact": "tasks.md",
+      "required_change": "解決 --cache flag 的三方矛盾（proposal Impact 與 tasks 1.5 要新增 --cache flag，design Decision #5 明確決定不新增）。採用 design 方案（cache 為 SDK runner 內建行為，無獨立 flag），將 task 1.5 改為「確認 handle_pack 將 cache_layout 參數正確傳遞給 build_packet」，並從 proposal Impact 移除 --cache flag 引用。",
+      "acceptance_criteria": "tasks.md 與 proposal.md 不再出現 --cache flag；cache layout 的啟用路徑與 design Decision #5 一致且可單一解讀。"
+    },
+    {
+      "target_artifact": "specs/packet-cache-benchmarking/spec.md",
+      "required_change": "修正 Savings calculation scenario 的公式。現行 `(static_byte_count / 4) * (1 - 0.1) * cache_hit_count` 以 byte/4 估算 token 不準（尤其中文內容），且折扣基礎錯誤。改以 API response 實際回報的 `cache_read_input_tokens` 為準（cache read 約享 90% 折扣），byte-based 數值僅作為無 API 呼叫時的粗估並明確標註為估計值。",
+      "acceptance_criteria": "spec 的 estimated_savings_tokens 定義以 API usage 的 cache token 欄位為權威來源；任何 byte-based 估算被標示為非權威估計；公式不再宣稱 byte_count/4 等於實際 token 數。"
+    },
+    {
+      "target_artifact": "tasks.md",
+      "required_change": "新增任務以擴充 AgentUsage 型別。設計要求將 cache_creation_input_tokens 與 cache_read_input_tokens 放入 AgentRunResult.usage，但現行 AgentUsage dataclass 為 frozen 且僅有三個欄位，tasks 完全未涵蓋此擴充。新增任務：為 AgentUsage 增加兩個帶預設值（None）的 cache token 欄位，確保現有 runner 建構處向後相容。",
+      "acceptance_criteria": "tasks.md 含一條明確的 AgentUsage 擴充任務；新欄位有預設值；現有 runner 不需修改即可通過 type check。"
+    },
+    {
+      "target_artifact": "design.md",
+      "required_change": "定義 static portion 內模板與 spec/design 之間的可靠分隔機制，使 SDK runner 的 _extract_template() 不需啟發式猜測邊界。在 cache layout 中為模板加上明確包裹（如第二個 marker 或 XML 標籤），並在 design 說明 runner 如何據此分離 system prompt 與 user content。",
+      "acceptance_criteria": "design 描述一個確定性的模板邊界標記；對應 spec/scenario 說明 runner 如何提取模板；不再依賴內容啟發式判斷模板結束位置。"
+    },
+    {
+      "target_artifact": "specs/packet-cache-layout/spec.md",
+      "required_change": "修正 marker escape 規則。現行將 `<!-- trly:cache_break -->` 替換為 `<!-- trly:cache_break_escaped -->`，escape 產物仍含 `trly:cache_break` 子字串，弱化防禦。改為 escape 成不含原始關鍵字的形式（HTML entity 或完全不同字串），並要求 runner 端統一以完整 marker 字串精確匹配。",
+      "acceptance_criteria": "spec 的 escape scenario 產出不含 `trly:cache_break` 子字串；runner 匹配規則明定為精確完整 marker 比對，避免子字串誤判。"
+    },
+    {
+      "target_artifact": "design.md",
+      "required_change": "為 cache layout 的 static portion 內模板與 spec/design 之間定義確定性分隔機制（第二個 marker 如 <!-- trly:template_end -->，或對模板使用 XML 包裹標籤），使 SDK runner 的 _extract_template()（tasks 2.5）能以標籤而非內容啟發式判斷模板結束邊界。Decision #4 的 system prompt 抽取流程須據此說明 runner 如何切出 system 與 user content，避免 spec 內容被誤移入 system 或模板殘留在 user message 造成重複計費。",
+      "acceptance_criteria": "design 描述一個確定性的模板邊界標記；對應 spec scenario 說明 runner 依此標記提取模板放入 system；packer spec 定義該邊界標記的產生規則；不再依賴對 static 串接內容的啟發式邊界判斷。"
+    },
+    {
+      "target_artifact": "tasks.md",
+      "required_change": "新增任務擴充 AgentUsage 型別。設計要求把 cache_creation_input_tokens / cache_read_input_tokens 放入 AgentRunResult.usage，但現行 AgentUsage 為 frozen dataclass 且僅有 input_tokens/output_tokens/cost_usd 三欄，tasks 完全未涵蓋。新增任務：為 AgentUsage 增加兩個帶預設值 None 的 cache token 欄位，並確認所有現有 runner 的 usage 建構處不需修改即可通過 type check。",
+      "acceptance_criteria": "tasks.md 含一條明確的 AgentUsage 擴充任務；新欄位有預設值且向後相容；現有 ClaudeRunner/CodexRunner/DeepSeekRunner 的 usage 建構不需改動即可通過型別檢查。"
+    },
+    {
+      "target_artifact": "specs/packet-cache-benchmarking/spec.md",
+      "required_change": "修正 Savings calculation scenario。現行 (static_byte_count / 4) * (1 - 0.1) * cache_hit_count 以 byte/4 估 token 對中文/多語內容誤差大，且折扣基礎錯誤。改以 API response 實際回報的 cache_read_input_tokens（cache read 約 90% 折扣）為權威來源計算節省量；byte-based 數值僅作為無 API 呼叫時的粗估並明確標註為非權威估計。",
+      "acceptance_criteria": "spec 的 estimated_savings_tokens 以 API usage 的 cache token 欄位為權威來源；任何 byte-based 估算被標示為非權威估計；公式不再宣稱 byte_count/4 等於實際 token 數。"
+    },
+    {
+      "target_artifact": "specs/packet-cache-layout/spec.md",
+      "required_change": "修正 marker escape 規則。現行將 <!-- trly:cache_break --> 替換為 <!-- trly:cache_break_escaped -->，escape 產物仍含 trly:cache_break 子字串，弱化防禦。改為 escape 成不含原始關鍵字的形式（HTML entity 或完全不同字串），並要求 runner 端統一以完整 marker 字串精確匹配（含 <!-- 與 -->），禁止寬鬆子字串檢查。",
+      "acceptance_criteria": "spec 的 escape scenario 產出不含 trly:cache_break 子字串；packet-cache-layout 與 sdk-cache-runner spec 對 marker 比對規則一致定義為精確完整匹配，避免子字串誤判。"
+    },
+    {
+      "target_artifact": "proposal.md",
+      "required_change": "收斂 CLI 介面的三方矛盾，統一採 design.md Decision #5（cache 為 SDK runner 內建行為，不新增 --cache flag）並對「自動啟用 caching」採 design 立場（task-relay 提供機制、由 caller/primary agent 決定是否啟用 cache layout）。從 proposal Impact 移除 --cache flag 引用，並移除「trly pack/apply 在 5 分鐘內連續委派時自動偵測啟用」的承諾，明確標註啟用為呼叫者責任。",
+      "acceptance_criteria": "proposal、design、tasks 三者對「誰負責啟用 cache layout」與「是否有 --cache flag」描述一致且可單一解讀；proposal 不再宣稱 task-relay 自動偵測連續委派，亦不再出現 --cache flag。"
+    },
+    {
+      "target_artifact": "tasks.md",
+      "required_change": "依上一項收斂結果，將 task 1.5 由「透過 --cache flag 啟用」改為「確認 handle_pack 將 cache_layout 參數正確傳遞給 build_packet」。另釐清 task 2.4：static portion 應作為單一 content block 附加單一 cache_control（與 design API 結構圖的 system 一個 + user static 一個共兩個 breakpoint 一致），或若刻意採每 section 獨立 cache_control 的多 breakpoint 設計，須在 design 補充理由與 trade-off。",
+      "acceptance_criteria": "tasks.md 不再出現 --cache flag；task 2.4 的 content block 數量與 cache_control 標記點與 design.md API request 結構圖一致；cache breakpoint 數量在 spec/design/tasks 三者描述一致。"
+    },
+    {
+      "target_artifact": "tasks.md",
+      "required_change": "補上測試可行性策略，避免 task 4.3 與 5.8 隱含每次 CI 需有效 ANTHROPIC_API_KEY 並產生 API 費用。明確分層：(a) 單元層 mock anthropic.messages.create() 的回傳（含假 usage.cache_* 欄位）驗證 _build_messages/_parse_cache_markers/_extract_template 與 cache_metrics 計算；(b) 需真實 API 的 cache hit/miss 整合測試採 record/replay 或標記為 manual-only，不進預設 CI。",
+      "acceptance_criteria": "tasks.md 明確區分可 mock 的測試與需真實 API 的測試；預設 CI 不依賴 ANTHROPIC_API_KEY 即可通過；需真實 API 的測試有 record/replay 或 manual-only 標記。"
+    },
+    {
+      "target_artifact": "design.md",
+      "required_change": "修正 Decision #1 的「對 CLI runner 完全透明」措辭：cache layout 不只是插入一行 marker，還把 scope note/budget note/repo refs 從前段移到後段，改變所有 runner（含 CLI）看到的 prompt 內容組織。明確說明此重排不影響 delegation 結果的理由，並在 tasks/tests 新增一條對「CLI runner + cache layout packet」的回歸測試。",
+      "acceptance_criteria": "design.md 不再宣稱完全透明，承認內容重排影響所有 runner 並給出不影響結果的理由；tasks.md 含一條 CLI runner 消費 cache-layout packet 的回歸測試任務。"
+    }
+  ],
+  "target_artifacts": [
+    {
+      "path": "proposal.md",
+      "baseline_sha256": "9da0db33fcec36ed35f0b929140b91b50bf5c7690cc66faa79717eb1c555267d"
+    },
+    {
+      "path": "tasks.md",
+      "baseline_sha256": "04926600b73fb36d4b5b8d7949f35a42bee49e8b37c3ce2f06909a5a61d534d9"
+    },
+    {
+      "path": "specs/packet-cache-benchmarking/spec.md",
+      "baseline_sha256": "b330fed4189df475d9da3f0d077f13b1e7174e4d1bd088c1b8316d231bb8c69e"
+    },
+    {
+      "path": "design.md",
+      "baseline_sha256": "2776988177324d115d23071a89e029403bdb15fad44181cc25053a407f2768d9"
+    },
+    {
+      "path": "specs/packet-cache-layout/spec.md",
+      "baseline_sha256": "66987273647f5c258522ae541ccf3abf66b1ebcef64fb3ab768e018c5b247f31"
+    }
+  ]
+}
