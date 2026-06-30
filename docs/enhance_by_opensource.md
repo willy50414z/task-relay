@@ -108,11 +108,11 @@ Reviewer B (GPT)    ──→
 ```bash
 # 平行雙審查模式
 trly run --target claude,deepseek --review-mode parallel --arbiter claude \
-  --prompt-file /tmp/review.md --expect-output spec/delegation_review.md
+  --prompt-file /tmp/review.md --expect-output openspec/changes/<change>/review/delegation_review.md
 
 # 現有序列 fallback 保持不變（成本優先）
 trly run --target claude=claude-haiku,deepseek --review-mode sequential \
-  --prompt-file /tmp/review.md --expect-output spec/delegation_review.md
+  --prompt-file /tmp/review.md --expect-output openspec/changes/<change>/review/delegation_review.md
 ```
 
 **實作要點**：
@@ -291,7 +291,7 @@ ai-plugins-cc 的 `/ai:compare`：
 ```bash
 # 並行比較多個 agent 的 review 品質
 trly run --targets claude,deepseek,codex --compare \
-  --prompt-file /tmp/review.md --expect-output spec/delegation_review.md
+  --prompt-file /tmp/review.md --expect-output openspec/changes/<change>/review/delegation_review.md
 ```
 
 ---

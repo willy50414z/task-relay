@@ -126,7 +126,7 @@ def make_prompt_adapter() -> PromptAdapter:
 def _non_interactive_message() -> str:
     return (
         "stdin is not a TTY; use required non-interactive flags: "
-        "--primary/--targets, --scope, --mode, and --sub-agent when mode is not 'main'"
+        "--primary/--targets, --scope, --feature, and --reviewers/--apply-chain when features are enabled"
     )
 
 

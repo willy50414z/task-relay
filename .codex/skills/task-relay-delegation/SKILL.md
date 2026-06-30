@@ -8,14 +8,22 @@ description: Delegation skill for task-relay managed OpenSpec workflows.
 This project uses task-relay delegation with **codex** as the primary
 orchestration agent.
 
-### Review Chain
+### Reviewers
 
-- primary: **claude** (model: claude-opus-4-8)
-- fallback 1: **deepseek** (model: deepseek-v4-pro[1m])
+- **codex** persona `/review` (model: gpt-5.5-high)
+- **deepseek** persona `/review` (model: deepseek-v4-pro[1m])
+
+### Arbiter Chain
+
+- stage 1: **claude** persona `/plan-ceo-review` (model: default)
+- stage 2: **claude** persona `/plan-eng-review` (model: default)
+
+Global timeout: `900` seconds.
 
 ### Apply Chain
 
-- primary: **deepseek** (model: deepseek-v4-pro[1m])
+- primary: **codex** (model: gpt-5.5-medium)
+- fallback 1: **deepseek** (model: deepseek-v4-pro[1m])
 
 ### Primary Execution Workflow
 
@@ -28,21 +36,29 @@ chain target with the packet file.
 Use review during the OpenSpec propose phase:
 
 ```bash
-trly pack --mode review-proposal --change <change> --out <packet>
-trly run --target claude --prompt-file <packet> --expect-output spec/delegation_review.md
+trly review-gate --change <change>
 ```
 
-The review delegate must write `spec/delegation_review.md`. The primary
-agent must read that artifact before accepting findings; a non-empty file
-only proves the output gate passed.
+The review gate runs reviewers in parallel, arbiters in order, validates
+JSON artifacts, and writes a merged `openspec/changes/<change>/review/delegation_review.md` summary.
 
 #### Apply
 
 Use apply during implementation or test drafting:
 
 ```bash
+trly apply --change <change> --task <task-id>
+```
+
+This high-level command packages the packet, uses the configured apply
+chain, runs the delegate in an isolated worktree, fails loudly on empty
+output, and prints a branch diff summary.
+
+Lower-level fallback:
+
+```bash
 trly pack --mode implementation-draft --change <change> --task <task-id> --out <packet>
-trly run --target deepseek --prompt-file <packet> --isolate --base <base-ref>
+trly run --target codex --prompt-file <packet> --isolate --base <base-ref>
 ```
 
 For test packets, use `--mode test-draft` and add `--diff-from` or
@@ -51,6 +67,18 @@ runs the delegate in an ephemeral git worktree on a throwaway `tr/<id>`
 branch with `git push` disabled. The primary agent reviews and integrates
 accepted branch diffs, runs final verification, and only then marks
 OpenSpec tasks complete.
+
+### Post-Install Validation
+
+After `trly install`, run:
+
+```bash
+trly doctor
+```
+
+`trly doctor` checks configured targets, tokens, CLI availability, model
+catalog matches, writable paths, managed blocks, and scope conflicts so
+setup issues fail before the first real delegated run.
 
 ### Output Modes
 

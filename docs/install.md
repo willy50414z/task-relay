@@ -2,6 +2,8 @@
 
 `trly install` 用於在 agent 指引檔案中寫入 task-relay 委派設定區塊（managed block），並安裝對應的技能包（skill bundle）。支援互動式精靈（interactive wizard）與非互動式 CLI 旗標兩種使用方式。
 
+若你想先理解 review / apply 功能本身，再回來看安裝流程，請先閱讀 [review-apply.md](./review-apply.md)。
+
 ## 快速開始
 
 ```bash
@@ -12,6 +14,12 @@ trly install
 trly install --targets codex,claude --scope project --feature review,apply \
   --review-chain claude=claude-opus-4-8,deepseek=deepseek-v4-pro[1m] \
   --apply-chain deepseek=deepseek-v4-pro[1m]
+
+# 安裝後先做 cheap validation / preflight
+trly doctor
+
+# 以高階 apply 命令執行單一 OpenSpec task
+trly apply --change <change> --task <task-id>
 
 # 清除委派設定（等同於 mode: main）
 trly install --targets codex --scope project --feature none
@@ -55,7 +63,7 @@ task-relay 透過在 agent 指引檔案中寫入 managed block 來設定委派�
 
 | 功能 | 說明 |
 |------|------|
-| `review` | Review — 在 propose phase 委派審查 agent 檢查需求清晰度、方向正確性與實作計畫完整性，產出 `spec/delegation_review.md` |
+| `review` | Review — 在 propose phase 委派審查 agent 檢查需求清晰度、方向正確性與實作計畫完整性，產出 `openspec/changes/<change>/review/delegation_review.md` |
 | `apply` | Apply — 在 implementation phase 委派實作 / 測試 agent 產出 patch 或實作報告；primary agent 仍負責整合、驗證與 OpenSpec 狀態變更 |
 
 若完全不選功能，則等同於 `mode: main`，會清除現有的 managed block。
@@ -76,6 +84,12 @@ task-relay 透過在 agent 指引檔案中寫入 managed block 來設定委派�
 ### 步驟 6：確認並寫入
 
 精靈會顯示設定摘要，確認後寫入指引檔案與技能包。
+
+寫入完成後，CLI 會額外輸出：
+
+- 已設定的 targets / features 摘要
+- 建議下一步命令（例如 `trly doctor`、`trly review-gate --change <change>`、`trly apply --change <change> --task <task-id>`）
+- cheap validation 結果摘要，提早暴露 token、CLI、model、scope 或 writable path 問題
 
 ## 非互動式 CLI 旗標
 
@@ -161,7 +175,7 @@ Primary model (codex) owns:
 
 ## Review Workflow (propose phase)
 
-When a proposal is ready for review, the primary agent packages the proposal context with the `review-proposal` template, delegates to the review chain, requires output at `spec/delegation_review.md`, reads that artifact, and updates proposal artifacts as needed.
+When a proposal is ready for review, the primary agent packages the proposal context with the `review-proposal` template, delegates to the review chain, requires output at `openspec/changes/<change>/review/delegation_review.md`, reads that artifact, and updates proposal artifacts as needed.
 
 Review agents evaluate requirement clarity, direction correctness, and implementation plan completeness. They must ask the user when ambiguity requires a product / architecture decision. They must not modify OpenSpec state, mark tasks, perform destructive operations, or make architecture decisions.
 
@@ -206,9 +220,9 @@ Review 用於 propose phase，不是實作流程。典型流程：
 1. Primary agent 使用 `review-proposal` template 打包提案 context。
 2. 呼叫 review chain 的 primary agent；若失敗可依 chain 順序 fallback。
 3. Review agent 檢查 requirement clarity、direction correctness、implementation plan completeness。
-4. Review agent 將 findings 寫到 `spec/delegation_review.md`。
-5. 執行時應使用 `--expect-output spec/delegation_review.md`，讓缺檔或空檔直接失敗。
-6. Primary agent 必須實際讀取 `spec/delegation_review.md`；非空檔只代表 gate 通過，不代表內容正確。
+4. Review agent 將 findings 寫到 `openspec/changes/<change>/review/delegation_review.md`。
+5. 執行時應使用 `--expect-output openspec/changes/<change>/review/delegation_review.md`，讓缺檔或空檔直接失敗。
+6. Primary agent 必須實際讀取 `openspec/changes/<change>/review/delegation_review.md`；非空檔只代表 gate 通過，不代表內容正確。
 7. 若 review 需要產品、架構或 scope 決策，review agent 應提出問題，由使用者或 primary agent 決定，而不是自行定義解法。
 
 建議命令形狀：
@@ -216,7 +230,7 @@ Review 用於 propose phase，不是實作流程。典型流程：
 ```bash
 trly pack --mode review-proposal --change <change> --out /tmp/<change>-review.md
 trly run --target <review-agent> --prompt-file /tmp/<change>-review.md \
-  --expect-output spec/delegation_review.md
+  --expect-output openspec/changes/<change>/review/delegation_review.md
 ```
 
 Review agent 的 non-goals：不得修改 OpenSpec state、不得勾選 tasks、不得執行破壞性操作、不得替 primary 做架構 / 安全 / migration 決策。
@@ -231,6 +245,14 @@ Apply 用於 implementation phase。Delegate 可以產出 patch、修改建議�
 4. Primary agent 檢查 delegate branch diff 或報告，決定是否接受、修改或丟棄。
 5. 接受後才合併回整合分支 / 主工作樹，並執行測試。
 6. Primary agent 驗證通過後才更新 OpenSpec `tasks.md` checkbox。空分支會失敗，不視為成功。
+
+若只是執行單一 bounded task，建議直接使用高階命令：
+
+```bash
+trly apply --change <change> --task <task-id>
+```
+
+`trly apply` 會整合 packet generation、configured apply chain、`run_isolated`、empty-branch fail-loud、branch summary，以及可選的 `--verify-cmd` 驗證 hook。
 
 建議命令形狀：
 
@@ -249,6 +271,37 @@ trly pack --mode test-draft --change <change> --task <task-id> \
 ```
 
 Apply agent 的 non-goals：不得修改 OpenSpec scope、不得勾選 tasks、不得執行破壞性操作、不得做 architecture / security / credential / migration 決策。
+
+## 安裝後驗證與診斷
+
+`trly doctor` 會做一組 cheap preflight checks，協助在第一次正式委派前先找出設定問題。檢查範圍包含：
+
+- agent CLI 與 token 是否可用
+- configured model 是否存在於 catalog
+- git repo / managed block / writable path 是否正常
+- review/apply feature 是否缺少必要 chain 設定
+- user / project scope 是否衝突
+
+範例：
+
+```bash
+trly doctor
+trly doctor --json
+trly doctor --targets codex,claude --scope project
+```
+
+若要量測 packed context 相對 full context 的大小與時間差，可使用：
+
+```bash
+trly pack-benchmark --eval-set tests/fixtures/pack_benchmark.json --json
+```
+
+目前 context-packer 的實際 contract 已包含：
+
+- semantic model fallback，可補上 spec / design section / task dependency / extra reads
+- byte-based hard budget 與 deterministic trimming
+- `pack-lint` 對 fallback、budget 與 JSON-only sidecar 的早期診斷
+- benchmark 報告中的 `selection_accuracy`、`context_cost`、`quality_outcome`
 
 ## 技能包結構
 
@@ -277,7 +330,7 @@ Apply agent 的 non-goals：不得修改 OpenSpec scope、不得勾選 tasks、�
 
 | 範本 | 用途 |
 |------|------|
-| `review-proposal` | Propose phase 審查 packet；輸出 findings 到 `spec/delegation_review.md`，供 primary agent 讀取後修正 proposal/design/tasks |
+| `review-proposal` | Propose phase 審查 packet；輸出 findings 到 `openspec/changes/<change>/review/delegation_review.md`，供 primary agent 讀取後修正 proposal/design/tasks |
 | `implementation-draft` | Implementation phase 實作 packet；輸出 patch、分支變更或逐檔編輯計畫，供 primary agent review / integrate |
 | `test-draft` | 測試委派 packet；輸出要新增的測試、驗證指令或 focused validation plan |
 | `review` | 針對 diff 或 spec 的審查發現（含嚴重性） |
@@ -400,7 +453,7 @@ trly install
 
 安裝的 managed block 會引導 primary agent 使用以下強化過的委派流程：
 
-- **Review 產出驗證**：review 委派以 `trly run ... --expect-output spec/delegation_review.md`
+- **Review 產出驗證**：review 委派以 `trly run ... --expect-output openspec/changes/<change>/review/delegation_review.md`
   執行，若審查檔未產生或為空會大聲失敗，而非僅憑 delegate 的 stdout 宣稱成功。primary 仍必須實際閱讀審查內容；非空只代表通過 gate，不代表內容正確。
   （審查檔已由舊名 `delegent_review.md` 更名為 `delegation_review.md`。）
 - **Apply 隔離**：apply 委派以 `trly run ... --isolate` 執行，delegate 在臨時 git worktree

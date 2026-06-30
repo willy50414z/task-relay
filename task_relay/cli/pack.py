@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from task_relay.packer import build_packet, plan_packet
-from task_relay.packer_eval import run_eval_set
+from task_relay.packer_eval import run_context_benchmark, run_eval_set
 
 
 def handle_pack(args: Namespace) -> int:
@@ -59,6 +59,13 @@ def handle_pack_metrics(args: Namespace) -> int:
     return 0
 
 
+def handle_pack_benchmark(args: Namespace) -> int:
+    report = run_context_benchmark(args.eval_set, cwd=args.cwd)
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+    return 0
+
+
 def handle_pack_lint(args: Namespace) -> int:
     plan = plan_packet(
         mode=args.mode,
@@ -74,13 +81,36 @@ def handle_pack_lint(args: Namespace) -> int:
     for gap in report["repo_context_gap"]:
         diagnostics.append({"severity": "warning", "code": "repo_context_gap", "detail": gap})
     if report.get("fallback_reason"):
-        diagnostics.append({"severity": "warning", "code": "fallback", "detail": report["fallback_reason"]})
+        severity = "error" if report["fallback_reason"] == "unresolved_capability_relevance" else "warning"
+        diagnostics.append({"severity": severity, "code": "fallback", "detail": report["fallback_reason"]})
+    if report.get("budget_status") == "trimmed":
+        diagnostics.append({
+            "severity": "warning",
+            "code": "budget_trimmed",
+            "detail": f"optional context trimmed to fit {report.get('budget_limit_bytes')} bytes",
+        })
+    if report.get("budget_status") == "violation":
+        diagnostics.append({
+            "severity": "error",
+            "code": "budget_violation",
+            "detail": f"core context exceeds {report.get('budget_limit_bytes')} byte budget",
+        })
+    model_resolution = report.get("model_resolution") or {}
+    if isinstance(model_resolution, dict) and model_resolution.get("status") == "rejected":
+        diagnostics.append({
+            "severity": "warning",
+            "code": "model_selection_rejected",
+            "detail": str(model_resolution.get("reason") or "rejected"),
+        })
+    sidecar_hint = _sidecar_hint(args.change, args.cwd)
+    if sidecar_hint is not None:
+        diagnostics.append(sidecar_hint)
     payload = {
         "change": args.change,
         "task": args.task,
         "advisory": True,
         "diagnostics": diagnostics,
-        "blocked": False,
+        "blocked": any(item["severity"] == "error" for item in diagnostics),
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2))
     sys.stdout.write("\n")
@@ -91,3 +121,17 @@ def _load_model_result(path: str | None) -> dict | None:
     if not path:
         return None
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _sidecar_hint(change: str, cwd: str | None) -> dict[str, object] | None:
+    base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    change_dir = base / "openspec" / "changes" / change
+    for name in ("packer.yml", "packer.yaml"):
+        path = change_dir / name
+        if path.is_file():
+            return {
+                "severity": "info",
+                "code": "json_only_sidecar",
+                "detail": f"{name} is accepted as a filename, but the file content must still be JSON syntax",
+            }
+    return None

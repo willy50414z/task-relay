@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 from task_relay.packer import plan_packet
@@ -21,6 +22,8 @@ class EvalExample:
     expected_design_sections: tuple[str, ...]
     expected_repo_files: tuple[str, ...]
     evidence: dict[str, str]
+    quality_proxy: dict[str, Any] | None = None
+    trace_filters: dict[str, dict[str, Any]] | None = None
 
 
 def load_eval_set(path: str | Path) -> list[EvalExample]:
@@ -95,11 +98,23 @@ def run_eval_set(path: str | Path, *, cwd: str | None = None) -> dict[str, Any]:
             "category": example.category,
             "fallback_reason": report.get("fallback_reason"),
             "byte_estimate": report["byte_estimate"],
+            "budget_status": report.get("budget_status"),
             "specs": _comparison(selected_specs, expected_specs),
             "task_blocks": _comparison(selected_task_blocks, expected_task_blocks),
             "design_sections": _comparison(selected_design_sections, expected_design_sections),
             "repo_files": _comparison(selected_repo_files, expected_repo_files),
             "evidence_count": len(example.evidence),
+            "selection_accuracy": {
+                "specs": _comparison(selected_specs, expected_specs),
+                "task_blocks": _comparison(selected_task_blocks, expected_task_blocks),
+                "design_sections": _comparison(selected_design_sections, expected_design_sections),
+                "repo_files": _comparison(selected_repo_files, expected_repo_files),
+            },
+            "context_cost": {
+                "byte_estimate": report["byte_estimate"],
+                "estimated_input_tokens": _estimate_tokens(int(report["byte_estimate"])),
+            },
+            "quality_outcome": _normalize_quality_proxy(example.quality_proxy),
         })
 
     total = len(examples)
@@ -114,6 +129,138 @@ def run_eval_set(path: str | Path, *, cwd: str | None = None) -> dict[str, Any]:
             "fallback_rate": (fallback_count / total) if total else 0.0,
             "average_packet_bytes": (total_packet_bytes / total) if total else 0.0,
             "design_section_recall_secondary": (design_found / design_expected) if design_expected else None,
+            "selection_accuracy": {
+                "spec_precision": _precision(spec_tp, spec_fp),
+                "spec_recall": _recall(spec_tp, spec_fn),
+                "task_block_precision": _precision(task_tp, task_fp),
+                "task_block_recall": _recall(task_tp, task_fn),
+                "design_section_recall_secondary": (design_found / design_expected) if design_expected else None,
+            },
+            "context_cost": {
+                "average_packet_bytes": (total_packet_bytes / total) if total else 0.0,
+            },
+            "quality_outcome": {
+                "fallback_rate": (fallback_count / total) if total else 0.0,
+            },
+        },
+        "results": results,
+    }
+
+
+def run_context_benchmark(path: str | Path, *, cwd: str | None = None) -> dict[str, Any]:
+    examples = load_eval_set(path)
+    results: list[dict[str, Any]] = []
+    packed_bytes_total = 0
+    full_bytes_total = 0
+    packed_duration_total_ms = 0.0
+    full_duration_total_ms = 0.0
+    actual_metrics_available = False
+
+    for example in examples:
+        packed_start = time.monotonic()
+        packed_plan = plan_packet(example.mode, example.change, task=example.task, cwd=cwd)
+        packed_duration_ms = (time.monotonic() - packed_start) * 1000.0
+        full_start = time.monotonic()
+        full_plan = plan_packet(
+            example.mode,
+            example.change,
+            task=example.task,
+            cwd=cwd,
+            full_change_context=True,
+        )
+        full_duration_ms = (time.monotonic() - full_start) * 1000.0
+
+        packed_report = packed_plan.to_report(
+            mode=example.mode,
+            change=example.change,
+            task=example.task,
+            full_change_context=False,
+        )
+        full_report = full_plan.to_report(
+            mode=example.mode,
+            change=example.change,
+            task=example.task,
+            full_change_context=True,
+        )
+
+        packed_bytes = int(packed_report["byte_estimate"])
+        full_bytes = int(full_report["byte_estimate"])
+        packed_trace = _lookup_trace_usage(cwd, example, "packed")
+        full_trace = _lookup_trace_usage(cwd, example, "full")
+        packed_bytes_total += packed_bytes
+        full_bytes_total += full_bytes
+        packed_duration_total_ms += packed_duration_ms
+        full_duration_total_ms += full_duration_ms
+        actual_metrics_available = actual_metrics_available or packed_trace is not None or full_trace is not None
+
+        packed_context_cost = _context_cost_payload(packed_bytes, packed_duration_ms, packed_trace)
+        full_context_cost = _context_cost_payload(full_bytes, full_duration_ms, full_trace)
+        quality_proxy = _normalize_quality_proxy(example.quality_proxy)
+
+        results.append({
+            "change": example.change,
+            "mode": example.mode,
+            "task": example.task,
+            "category": example.category,
+            "packed": {
+                "byte_estimate": packed_bytes,
+                "duration_ms": round(packed_duration_ms, 3),
+                "fallback_reason": packed_report.get("fallback_reason"),
+                "selection_mode": packed_report.get("selection_mode"),
+                "budget_status": packed_report.get("budget_status"),
+            },
+            "full": {
+                "byte_estimate": full_bytes,
+                "duration_ms": round(full_duration_ms, 3),
+                "fallback_reason": full_report.get("fallback_reason"),
+                "selection_mode": full_report.get("selection_mode"),
+                "budget_status": full_report.get("budget_status"),
+            },
+            "delta": {
+                "bytes_saved": full_bytes - packed_bytes,
+                "bytes_saved_ratio": None if full_bytes == 0 else (full_bytes - packed_bytes) / full_bytes,
+            },
+            "quality_proxy": quality_proxy,
+            "tokens": {
+                "packed_input_tokens": packed_trace["input_tokens"] if packed_trace else None,
+                "packed_output_tokens": packed_trace["output_tokens"] if packed_trace else None,
+                "full_input_tokens": full_trace["input_tokens"] if full_trace else None,
+                "full_output_tokens": full_trace["output_tokens"] if full_trace else None,
+            },
+            "context_cost": {
+                "packed": packed_context_cost,
+                "full": full_context_cost,
+            },
+            "quality_outcome": quality_proxy,
+        })
+
+    sample_count = len(examples)
+    bytes_saved_total = full_bytes_total - packed_bytes_total
+    return {
+        "sample_count": sample_count,
+        "metrics": {
+            "average_packed_bytes": (packed_bytes_total / sample_count) if sample_count else 0.0,
+            "average_full_bytes": (full_bytes_total / sample_count) if sample_count else 0.0,
+            "average_bytes_saved": (bytes_saved_total / sample_count) if sample_count else 0.0,
+            "average_bytes_saved_ratio": None if full_bytes_total == 0 else bytes_saved_total / full_bytes_total,
+            "average_packed_duration_ms": (packed_duration_total_ms / sample_count) if sample_count else 0.0,
+            "average_full_duration_ms": (full_duration_total_ms / sample_count) if sample_count else 0.0,
+            "token_metrics_available": actual_metrics_available,
+            "selection_accuracy": {
+                "samples": sample_count,
+            },
+            "context_cost": {
+                "average_packed_estimated_tokens": (_estimate_tokens(packed_bytes_total) / sample_count) if sample_count else 0.0,
+                "average_full_estimated_tokens": (_estimate_tokens(full_bytes_total) / sample_count) if sample_count else 0.0,
+            },
+            "quality_outcome": {
+                "quality_proxy_fields": [
+                    "review_artifact_sections_present",
+                    "verification_passed",
+                    "apply_exit_code",
+                    "retry_count",
+                ],
+            },
         },
         "results": results,
     }
@@ -135,6 +282,8 @@ def _parse_example(item: object) -> EvalExample:
         expected_design_sections=tuple(_list(item.get("expected_design_sections"))),
         expected_repo_files=tuple(_list(item.get("expected_repo_files"))),
         evidence={str(k): str(v) for k, v in evidence.items()},
+        quality_proxy=item.get("quality_proxy") if isinstance(item.get("quality_proxy"), dict) else None,
+        trace_filters=item.get("trace_filters") if isinstance(item.get("trace_filters"), dict) else None,
     )
 
 
@@ -165,3 +314,55 @@ def _precision(tp: int, fp: int) -> float | None:
 def _recall(tp: int, fn: int) -> float | None:
     denom = tp + fn
     return None if denom == 0 else tp / denom
+
+
+def _estimate_tokens(byte_count: int) -> int:
+    return max(1, round(byte_count / 4)) if byte_count > 0 else 0
+
+
+def _normalize_quality_proxy(raw: dict[str, Any] | None) -> dict[str, Any]:
+    proxy = raw or {}
+    return {
+        "review_artifact_sections_present": proxy.get("review_artifact_sections_present", "missing"),
+        "verification_passed": proxy.get("verification_passed", "missing"),
+        "apply_exit_code": proxy.get("apply_exit_code", "missing"),
+        "retry_count": proxy.get("retry_count", "missing"),
+    }
+
+
+def _context_cost_payload(byte_estimate: int, duration_ms: float, trace_usage: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "byte_estimate": byte_estimate,
+        "estimated_input_tokens": _estimate_tokens(byte_estimate),
+        "actual_input_tokens": trace_usage["input_tokens"] if trace_usage else "unavailable",
+        "actual_output_tokens": trace_usage["output_tokens"] if trace_usage else "unavailable",
+        "actual_cost_usd": trace_usage["cost_usd"] if trace_usage else "unavailable",
+        "duration_ms": round(duration_ms, 3),
+    }
+
+
+def _lookup_trace_usage(cwd: str | None, example: EvalExample, variant: str) -> dict[str, Any] | None:
+    filters = (example.trace_filters or {}).get(variant)
+    if not isinstance(filters, dict):
+        return None
+    base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    trace_path = base / ".task_relay" / "trace.jsonl"
+    if not trace_path.is_file():
+        return None
+    for line in reversed(trace_path.read_text(encoding="utf-8").splitlines()):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if any(payload.get(key) != value for key, value in filters.items()):
+            continue
+        return {
+            "input_tokens": payload.get("tokens_in", "unavailable"),
+            "output_tokens": payload.get("tokens_out", "unavailable"),
+            "cost_usd": payload.get("cost_usd", "unavailable"),
+        }
+    return None

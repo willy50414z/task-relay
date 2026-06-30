@@ -99,15 +99,15 @@ async def _run_review_gate_async(
     cwd: str | None = None,
 ) -> ReviewGateResult:
     base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
-    spec_dir = base / "spec"
-    spec_dir.mkdir(parents=True, exist_ok=True)
+    review_dir = _review_dir(base, change)
+    review_dir.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + config.global_timeout
 
     reviewers = await run_parallel_review(change, config, cwd=str(base), deadline=deadline)
     arbiters = await run_arbiter_chain(change, config, reviewers, cwd=str(base), deadline=deadline)
     decision = _aggregate_decision(arbiters)
     result_path = _write_result_json(base, change, decision, reviewers, arbiters)
-    summary_path = _write_summary(spec_dir / "delegation_review.md", decision, reviewers, arbiters)
+    summary_path = _write_summary(review_dir / "delegation_review.md", decision, reviewers, arbiters)
     return ReviewGateResult(
         decision=decision,
         reviewer_artifacts=tuple(reviewers),
@@ -168,7 +168,7 @@ async def _run_reviewer(
     cwd: str,
     timeout: float,
 ) -> ReviewArtifact:
-    output_path = Path(cwd) / "spec" / f"delegation_review_{reviewer_id}.json"
+    output_path = _review_dir(Path(cwd), change) / f"delegation_review_{reviewer_id}.json"
     packet_text = build_packet("review-proposal", change, cwd=cwd, full_change_context=True)
     packet_text = _prepend_persona_packet(entry, packet_text, output_path)
     packet_path = _write_temp_packet(packet_text)
@@ -190,7 +190,7 @@ async def _run_arbiter(
     cwd: str,
     timeout: float,
 ) -> ArbiterArtifact:
-    output_path = Path(cwd) / "spec" / f"delegation_arbiter_{stage_id}.json"
+    output_path = _review_dir(Path(cwd), change) / f"delegation_arbiter_{stage_id}.json"
     packet_text = build_packet("review-arbiter", change, cwd=cwd, full_change_context=True)
     packet_text = _prepend_arbiter_packet(entry, packet_text, reviewers, prior_arbiters, output_path)
     packet_path = _write_temp_packet(packet_text)
@@ -354,7 +354,7 @@ def _write_result_json(
     reviewers: list[ReviewArtifact],
     arbiters: list[ArbiterArtifact],
 ) -> Path:
-    path = base / "spec" / "delegation_review_result.json"
+    path = _review_dir(base, change) / "delegation_review_result.json"
     actionable_items = _collect_actionable_items(arbiters)
     payload = {
         "change": change,
@@ -396,10 +396,11 @@ def _write_temp_packet(text: str) -> Path:
 
 def _prepend_persona_packet(entry: ReviewRoleEntry, packet: str, output_path: Path) -> str:
     persona = entry.persona or DEFAULT_REVIEWER_PERSONA
+    strict = _strict_reviewer_output_contract(entry, output_path)
     return (
         f"Reviewer persona: `{entry.agent}:{persona}`\n"
         f"Expected output path: `{output_path}`\n"
-        "Return JSON only.\n\n"
+        f"{strict}\n\n"
         f"{_persona_text(persona)}\n\n"
         f"{packet}"
     )
@@ -423,7 +424,7 @@ def _prepend_arbiter_packet(
     parts = [
         f"Arbiter persona: `{entry.agent}:{entry.persona}`",
         f"Expected output path: `{output_path}`",
-        "Return JSON only.",
+        _strict_arbiter_output_contract(entry, output_path),
         "",
         _persona_text(entry.persona or "/plan-eng-review"),
         "",
@@ -447,6 +448,37 @@ def _unique_entry_ids(entries: tuple[ReviewRoleEntry, ...] | list[ReviewRoleEntr
         identifier = base if counts[base] == 1 else f"{base}_{counts[base]}"
         result.append((identifier, entry))
     return result
+
+
+def _strict_reviewer_output_contract(entry: ReviewRoleEntry, output_path: Path) -> str:
+    lines = ["Return JSON only."]
+    if entry.agent == "deepseek":
+        lines.extend([
+            f"You MUST create the JSON file at `{output_path}`.",
+            "Do not output markdown fences.",
+            "Do not output prose before or after the JSON object.",
+            "Do not use fields named `category` or `title` inside findings.",
+            "Every finding object MUST contain exactly these required fields: `severity`, `area`, `description`, `recommendation`.",
+            "Valid verdict values: `PASS`, `CONCERNS`, `BLOCKED`.",
+            "Valid area values: `architecture`, `security`, `qa`, `scope`, `tests`.",
+            "If there are no findings, return an empty findings array.",
+        ])
+    return "\n".join(lines)
+
+
+def _strict_arbiter_output_contract(entry: ReviewRoleEntry, output_path: Path) -> str:
+    lines = ["Return JSON only."]
+    if entry.agent == "deepseek":
+        lines.extend([
+            f"You MUST create the JSON file at `{output_path}`.",
+            "Do not output markdown fences.",
+            "Do not output prose before or after the JSON object.",
+            "Every actionable item MUST contain `target_artifact`, `required_change`, and `acceptance_criteria`.",
+            "Valid decision values: `APPROVE`, `REVISE`, `REJECT`.",
+            "If the decision is `REVISE`, actionable_items MUST be non-empty.",
+            "If the decision is not `REVISE`, actionable_items MAY be an empty array.",
+        ])
+    return "\n".join(lines)
 
 
 def _slug(value: str) -> str:
@@ -479,7 +511,7 @@ def verify_revision_readiness(
 ) -> dict:
     base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
     change_dir = base / "openspec" / "changes" / change
-    path = Path(result_path) if result_path else base / "spec" / "delegation_review_result.json"
+    path = Path(result_path) if result_path else _review_dir(base, change) / "delegation_review_result.json"
     if not path.is_absolute():
         path = base / path
     payload = _load_json(path)
@@ -575,3 +607,7 @@ def _artifact_sha256(path: Path) -> str | None:
     if not path.is_file():
         return None
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _review_dir(base: Path, change: str) -> Path:
+    return base / "openspec" / "changes" / change / "review"

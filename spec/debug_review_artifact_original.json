@@ -1,0 +1,67 @@
+{
+  "reviewer": "deepseek:/review",
+  "verdict": "CONCERNS",
+  "summary": "提案方向正確、問題診斷精準，但 sidecar 格式決策未收斂、model fallback 欄位如何映射到 packet assembly 未具體化、預算設定機制與下游品質代理欄位定義不足，建議在進入實作前先解決三個 open items。",
+  "findings": [
+    {
+      "severity": "high",
+      "area": "architecture",
+      "description": "Decision 2 選擇「補齊 contract」讓 model fallback 真正套用 design_sections、task_dependencies、extra_reads，但 tasks 1.2 未指定這些欄位的映射方式。model 回傳的 design_sections 是字串陣列，如何對應到 design.md 的實際 section？如何與 sidecar 中的 design_sections 合併或排優先？spec 中也沒有對應的 formal requirement。",
+      "recommendation": "在 spec 中新增 requirement，定義 model-returned design_sections / task_dependencies / extra_reads 如何被 packet builder 解析、驗證與套用。明確 model 結果與 sidecar 的優先級關係。"
+    },
+    {
+      "severity": "high",
+      "area": "scope",
+      "description": "Design Decision 5 與 Open Questions 互相矛盾：Decision 5 建議收斂為 JSON-only，但 Open Questions 仍在問「是否在這個 change 內正式導入 YAML parser」。task 4.1 被設計為「決定並落實」的決策閘，而非可執行的實作任務。此未收斂的決策直接影響 tasks 4.2、4.3 的內容。",
+      "recommendation": "在進入實作前先做出 sidecar 格式的最終決定。若選擇 JSON-only，將 task 4.1 改為具體的 lint/error 實作任務；若選擇導入 YAML，需新增 YAML parser 實作與測試任務。"
+    },
+    {
+      "severity": "high",
+      "area": "architecture",
+      "description": "Trimming 順序定義中「lower-ranked specs」（第 4 層）的排名機制未定義。spec 的 wording 使用「secondary context」vs「required task and core spec context」，但 spec 是依據 score、explicit mapping、還是其他機制來判定哪些是 core 哪些是 secondary？沒有這個定義，trimming 就不是真正 deterministic。",
+      "recommendation": "在 spec 中明確定義 spec 的排名順序（例如按 score 降序、sidecar explicit mapping 優先保留）。若 trimming 落在 specs 層，必須能回答「哪些 spec 先被裁」。"
+    },
+    {
+      "severity": "medium",
+      "area": "scope",
+      "description": "Proposal 的 Capabilities 區塊標示「Modified Capabilities: None」，但 semantic assembly 實際上是修正既有 model fallback 的行為（從只套用 specs 改為套用所有欄位），不是新增功能而是行為修正。此分類可能讓 downstream consumer 誤判變更的 breakage 風險。",
+      "recommendation": "將 semantic assembly 標示為既有 model fallback 的 behavior change，或至少在第一個 capability 的 description 中明確說明這是對現有行為的修正。"
+    },
+    {
+      "severity": "medium",
+      "area": "architecture",
+      "description": "Budget 設定機制完全未被定義：budget_limit_bytes 從何而來？是 CLI flag、sidecar 欄位、packer 內建常數、還是 per-mode profile？tasks 2.1 只說「為 PacketPlan 加入 budget status 欄位」但跳過了 budget 本身的來源。",
+      "recommendation": "在 spec 或 design 中定義 budget 的設定來源與預設值。建議先以 per-mode 內建預設值為基礎，保留 sidecar override 擴充點。"
+    },
+    {
+      "severity": "medium",
+      "area": "qa",
+      "description": "缺少 model fallback 與 budget trimming 互動的整合測試任務。例如：當 model fallback 選了 5 個 spec、但 budget 只容許 2 個時，被 trim 的是哪些 spec？trimming diagnostics 是否正確反映 model selection 的原始意圖？",
+      "recommendation": "在 tasks.md 中新增一項整合測試任務，覆蓋 model fallback → budget trimming 的互動路徑，確保 diagnostics 同時反映 model selection 與 budget trimming 的決策鏈。"
+    },
+    {
+      "severity": "medium",
+      "area": "scope",
+      "description": "下游品質代理（downstream quality proxy）在 design Decision 4 中舉例為「review artifact completeness、apply verification pass rate、fallback / retry rate」，但 spec 中只說「machine-readable quality proxy fields」而從未定義 schema。這使得 tasks 3.3 的實作缺乏明確的合約。",
+      "recommendation": "在 benchmark spec 中定義 quality proxy 的最小欄位集合（至少包含 artifact_completeness、verification_pass_rate、fallback_rate），並標示哪些是 required、哪些是 optional。"
+    },
+    {
+      "severity": "low",
+      "area": "scope",
+      "description": "Proposal 的 Impact 區塊提到影響 trly pack-lint、trly pack-metrics、trly pack-benchmark，但未描述這些 CLI 子命令現有輸出格式，讓 reviewer 只能從程式碼推測影響範圍。",
+      "recommendation": "在 design.md 中簡述現有 CLI 子命令的輸出行為，並對比預期變更後的差異。"
+    },
+    {
+      "severity": "low",
+      "area": "architecture",
+      "description": "Budget trimming 規格未涵蓋極端場景：當預算小到連核心 task/spec 都裝不下時，系統行為未定義。目前規格只說「先裁 optional」，但未說明 core 超限時的 fallback 策略（報錯？強制 full fallback？裁減 core 內容？）。",
+      "recommendation": "在 budgeting spec 中新增 scenario：'WHEN even core context exceeds budget THEN the system SHALL signal a budget violation with a machine-readable error and the remaining core context that fits'。"
+    },
+    {
+      "severity": "low",
+      "area": "tests",
+      "description": "Tasks 2.4 要求「補 packet budget 測試，驗證超限時的 trimming 順序與輸出穩定性」，但未指定測試要覆蓋哪些 trimming 層級組合。trimming 有多達 5 層優先級，測試矩陣可能很大但 tasks 未界定覆蓋範圍。",
+      "recommendation": "在 task 2.4 中明確測試場景：至少覆蓋 (a) 只 trim extra_reads 即達標 (b) trim 到 design_sections (c) trim 到 specs (d) 無超限不需 trim。"
+    }
+  ]
+}

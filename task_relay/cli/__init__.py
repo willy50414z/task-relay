@@ -6,10 +6,13 @@ from typing import Sequence
 
 from task_relay.cli.evaluate import handle_evaluate
 from task_relay.cli.health import handle_health
-from task_relay.cli.pack import handle_pack, handle_pack_lint, handle_pack_metrics
+from task_relay.cli.doctor import handle_doctor
+from task_relay.cli.pack import handle_pack, handle_pack_benchmark, handle_pack_lint, handle_pack_metrics
+from task_relay.cli.apply import handle_apply
 from task_relay.cli.run import handle_run
 from task_relay.cli.trace import handle_trace
 from task_relay.delegation import InstallResult, clear, install, parse_existing_block, resolve_install_paths, uninstall
+from task_relay.doctor import build_doctor_report, summarize_validation
 from task_relay.review_config import (
     DEFAULT_GLOBAL_TIMEOUT,
     ReviewRoleEntry,
@@ -102,6 +105,12 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     pack_metrics_parser.add_argument("--json", action="store_true", required=True)
     pack_metrics_parser.set_defaults(handler=handle_pack_metrics)
 
+    pack_benchmark_parser = subparsers.add_parser("pack-benchmark", help="Compare packed and full-change context across an eval set.")
+    pack_benchmark_parser.add_argument("--eval-set", required=True, help="Path to a JSON benchmark set.")
+    pack_benchmark_parser.add_argument("--cwd", help="Project root containing openspec/ (defaults to current dir)")
+    pack_benchmark_parser.add_argument("--json", action="store_true", required=True)
+    pack_benchmark_parser.set_defaults(handler=handle_pack_benchmark)
+
     pack_lint_parser = subparsers.add_parser("pack-lint", help="Advisory diagnostics for packer scope signals and fallback behavior.")
     pack_lint_parser.add_argument("--change", required=True, help="OpenSpec change name")
     pack_lint_parser.add_argument("--task", help="Task id to lint")
@@ -157,6 +166,31 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     review_gate_parser.add_argument("--verify-revision", action="store_true", help="Verify whether a prior REVISE contract has been satisfied.")
     review_gate_parser.add_argument("--result-path", help="Override the machine-readable review result artifact path.")
     review_gate_parser.set_defaults(handler=handle_review_gate)
+
+    apply_parser = subparsers.add_parser("apply", help="Run high-level isolated apply orchestration for one task.")
+    add_target_args(apply_parser, required=False)
+    apply_parser.add_argument("--change", required=True, help="OpenSpec change name")
+    apply_parser.add_argument("--task", required=True, help="Task id within tasks.md")
+    apply_parser.add_argument("--mode", default="implementation-draft", choices=["implementation-draft", "test-draft"])
+    apply_parser.add_argument("--read", action="append", default=[], dest="extra_reads", metavar="PATH", help="Extra repo file to inline. Repeatable.")
+    apply_parser.add_argument("--diff-file", help="Explicit diff file for test-mode dynamic repo context.")
+    apply_parser.add_argument("--diff-from", help="Git ref to diff from for test-mode dynamic repo context.")
+    apply_parser.add_argument("--verify-cmd", help="Optional verification command to run in a temp worktree based on the delegated branch.")
+    apply_parser.add_argument("--model")
+    apply_parser.add_argument("--effort")
+    apply_parser.add_argument("--timeout", type=float, default=1800)
+    apply_parser.add_argument("--cwd")
+    apply_parser.add_argument("--allow-dirty", action="store_true")
+    apply_parser.add_argument("--base", default="HEAD")
+    apply_parser.add_argument("--json", action="store_true", help="Emit structured JSON output.")
+    apply_parser.set_defaults(handler=handle_apply)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run delegation preflight checks.")
+    doctor_parser.add_argument("--targets", type=parse_install_targets, help="Optional install targets to validate paths for (claude,codex).")
+    doctor_parser.add_argument("--scope", choices=["user", "project"], help="Restrict config/path checks to one scope.")
+    doctor_parser.add_argument("--cwd")
+    doctor_parser.add_argument("--json", action="store_true", help="Emit structured JSON output.")
+    doctor_parser.set_defaults(handler=handle_doctor)
 
     install_parser = subparsers.add_parser("install", help="Install task-relay delegation guidance interactively.")
     install_group = install_parser.add_mutually_exclusive_group()
@@ -316,6 +350,22 @@ def _print_install_results(results: list[InstallResult]) -> None:
         print(f"  Scope         : {result.scope}")
 
 
+def _print_post_install_guidance(*, cwd: Path, scope: str, target_agents: list[str], features: list[str]) -> None:
+    print("Next steps:")
+    print("  1. Run `trly doctor` to verify delegation readiness.")
+    if "review" in features:
+        print("  2. Run `trly review --change <change>` or `trly review-gate --change <change>`.")
+    if "apply" in features:
+        print("  2. Run `trly apply --change <change> --task <task-id>` for isolated implementation work.")
+    report = build_doctor_report(cwd=str(cwd), target_agents=target_agents, scope=scope)
+    ok, blockers = summarize_validation(report)
+    print(f"Validation: {'passed' if ok else 'failed'}")
+    if blockers:
+        for blocker in blockers[:3]:
+            print(f"  - {blocker}")
+        print("  Run `trly doctor --json` for the full report.")
+
+
 # ── Handlers ────────────────────────────────────────────────────────
 
 def handle_install(args) -> int:
@@ -442,6 +492,7 @@ def handle_install(args) -> int:
             for target in target_agents
         ]
         _print_install_results(results)
+        _print_post_install_guidance(cwd=cwd, scope=args.scope, target_agents=target_agents, features=features)
         return 0
 
     if not sys.stdin.isatty():
@@ -452,10 +503,12 @@ def handle_install(args) -> int:
         print("Partial flags provided — launching interactive wizard to complete configuration.")
 
     prompt = make_prompt_adapter()
+    wizard_results: list[InstallResult] = []
 
     def write_fn(state: WizardState):
+        wizard_results.clear()
         for target in state.target_agents:
-            install(
+            wizard_results.append(install(
                 primary_agent=target,
                 scope=state.scope,
                 features=state.features,
@@ -464,15 +517,29 @@ def handle_install(args) -> int:
                 apply_chain=state.apply_chain,
                 global_timeout=state.global_timeout,
                 cwd=state.cwd,
-            )
+            ))
 
     def clear_fn(state: WizardState):
         for target in state.target_agents:
             clear(primary_agent=target, scope=state.scope, cwd=state.cwd)
 
     prefill_state = _resolve_prefill_state(target_agents, args.scope, cwd)
-
-    return run_wizard(write_fn, clear_fn, cwd=cwd, prefill_state=prefill_state, prompt=prompt)
+    exit_code = run_wizard(write_fn, clear_fn, cwd=cwd, prefill_state=prefill_state, prompt=prompt)
+    if exit_code == 0 and wizard_results:
+        _print_install_results(wizard_results)
+        state_scope = wizard_results[0].scope
+        wizard_features = prefill_state.features if prefill_state is not None else []
+        if wizard_results:
+            # The wizard writes one consistent config set across targets.
+            parsed = parse_existing_block(wizard_results[0].guidance_path) or {}
+            wizard_features = parsed.get("features") or wizard_features
+        _print_post_install_guidance(
+            cwd=cwd,
+            scope=state_scope,
+            target_agents=[result.primary_agent for result in wizard_results],
+            features=wizard_features,
+        )
+    return exit_code
 
 
 def _non_interactive_install_error() -> str:

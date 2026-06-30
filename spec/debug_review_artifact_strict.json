@@ -1,0 +1,37 @@
+{
+  "reviewer": "deepseek:/review",
+  "verdict": "CONCERNS",
+  "summary": "提案方向正確且設計決策合理（deterministic-first、三層 benchmark、hard budget），但存在一個高優先級缺口（預算定義未具體化）與數個中等問題（model fallback 與 sidecar 互動未定義、部分 task 粒度不均、開放問題未決）。建議先補齊預算介面定義並釐清 model/sidecar 優先序再開始實作。",
+  "findings": [
+    {
+      "severity": "high",
+      "area": "architecture",
+      "description": "Budget definition is referenced throughout design.md, tasks.md, and the budgeting spec, but the actual budget limit parameter is never defined. It is unclear whether the budget is expressed in bytes, estimated tokens, or a configurable threshold, and how the user or system sets it (CLI flag, config file, hardcoded constant). Tasks 2.1-2.4 all depend on this definition but cannot be implemented without it. The budgeting spec uses the phrase 'defined budget' without specifying who or what defines it.",
+      "recommendation": "Define the budget interface contract before starting section 2 tasks. Specify: (a) unit (bytes or token estimate), (b) default value, (c) configuration mechanism (e.g., `--packet-budget` CLI flag or sidecar field `packet_budget_bytes`), and (d) whether budget is mode-dependent (review-proposal vs implementation-draft may have different limits). Add this to the design.md Decisions section and budgeting spec."
+    },
+    {
+      "severity": "medium",
+      "area": "architecture",
+      "description": "Model fallback and sidecar signal interaction is unspecified for shared fields. The current code already extracts `design_sections` and `task_dependencies` from sidecar signals (`_scoped_sections` lines 648-656, `_task_dependencies` lines 556-566). Design decision #2 says model fallback should also return these fields, but the proposal does not define the precedence or merge semantics. If both sidecar and model provide `design_sections`, which wins? Can model fallback supplement sidecar selections, or does one fully override the other? Task 1.2 cannot be correctly implemented without this clarification.",
+      "recommendation": "Add a design decision or spec scenario that defines the interaction: (a) sidecar wins by default, model fallback only fills in missing fields, (b) model fallback supplements sidecar with additive selections, or (c) whichever source has higher priority in the selection chain. Document this precedence in the semantic assembly spec and in design.md Decision #2."
+    },
+    {
+      "severity": "medium",
+      "area": "scope",
+      "description": "Task granularity is uneven across the four sections. Task 1.1 ('重構 context-packer 的 selection result 結構，明確區分 specs、design sections、task dependencies 與 repo context') is a large refactoring that touches the core data flow of packer.py (currently `SpecSelection` is tightly coupled with `PacketPlan` assembly). Task 3.1 ('擴充 packer_eval 報告結構，分開呈現 selection accuracy、context cost 與 quality outcome') similarly implies a full report schema redesign. These are each multi-step efforts described as single checkboxes, while simpler tasks like 1.3 or 4.2 are comparably scoped. This makes progress tracking and verification harder.",
+      "recommendation": "Break tasks 1.1 and 3.1 into finer-grained subtasks. For 1.1: (a) define the new SelectionResult dataclass schema, (b) migrate SpecSelection fields to SelectionResult, (c) update `_scoped_sections` to populate the new structure, (d) update `PacketPlan` construction. For 3.1: (a) define the three-layer report schema, (b) add selection accuracy section, (c) add context cost section, (d) add quality outcome section."
+    },
+    {
+      "severity": "low",
+      "area": "qa",
+      "description": "Two open questions from design.md remain unresolved and block implementation decisions. The sidecar format question (YAML vs JSON) is deferred to task 4.1 ('決定並落實'), meaning the decision happens during implementation rather than before it. The trace-backed metrics question (actual token/cost vs estimate) affects tasks 3.2-3.3. Unresolved decisions made mid-implementation risk rework if the chosen direction proves wrong.",
+      "recommendation": "Resolve both open questions before starting implementation. For sidecar format: the design.md already recommends JSON-only — formalize this as a decision and remove the 'open question' label. For trace metrics: decide whether v1 ships with estimate-only and optional trace enrichment, or requires trace integration. Document the resolution in design.md and update affected task descriptions accordingly."
+    },
+    {
+      "severity": "low",
+      "area": "tests",
+      "description": "No task covers updating existing tests or validating backward compatibility of the `PacketPlan.to_report()` output contract. The proposal adds new fields to `PacketPlan` (budget_status, trimmed_sections, budget_limit_bytes) and changes the report structure. Any existing consumer of `to_report()` or the pack report JSON schema will break. The test tasks (1.4, 2.4, 3.5) only cover new functionality, not regression protection for existing behavior.",
+      "recommendation": "Add a task to section 1 or 2: 'Update existing packer tests to validate backward compatibility of the report schema, ensuring existing consumers receive all previously-available fields with unchanged semantics.' Alternatively, version the report schema explicitly so consumers can detect breaking changes."
+    }
+  ]
+}

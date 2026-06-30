@@ -35,6 +35,7 @@ python -m pip install -e .
 ```bash
 trly --help
 trly health --json
+trly doctor
 ```
 
 ## Quick start
@@ -108,14 +109,21 @@ trly health --target deepseek --json
 # Install delegation guidance (arrow-key interactive wizard)
 trly install
 
-# Non-interactive install
-trly install --targets codex,claude --scope project --mode hybrid --sub-agent deepseek \
-  --model sub=deepseek-v4-pro[1m]
+# Non-interactive install with review and apply chains
+trly install --targets codex,claude --scope project --feature review,apply \
+  --review-chain claude=claude-opus-4-8 --apply-chain deepseek=deepseek-v4-pro[1m]
+
+# Validate the generated setup before first delegated run
+trly doctor
+
+# Run one bounded OpenSpec apply task through the configured apply chain
+trly apply --change <change> --task <task-id>
 
 # Uninstall delegation guidance
 trly uninstall
-trly uninstall --scope project
 ```
+
+After `trly install`, task-relay now prints next-step guidance and a cheap validation summary so setup issues are surfaced before the first real review/apply run.
 
 ## Python API reference
 
@@ -263,9 +271,10 @@ All errors inherit from `TaskRelayError(RuntimeError)`.
 
 task-relay stores configuration in managed blocks within agent guidance files (no config file needed). Run `trly install` to set up delegation with an arrow-key interactive wizard.
 
-**User scope** (`~/.claude/CLAUDE.md` plus `~/.claude/skills/`, or `~/.codex/AGENTS.md` plus `~/.codex/skills/`): global defaults for all projects.
+詳細的安裝與設定說明請參閱 **[docs/install.md](docs/install.md)**。
+Review / Apply 功能總覽請參閱 **[docs/review-apply.md](docs/review-apply.md)**。
 
-**Project scope** (`./CLAUDE.md` plus `./.claude/skills/`, or `./AGENTS.md` plus `./.codex/skills/`): per-project overrides.
+For preflight checks after install, use `trly doctor`. For higher-level OpenSpec implementation delegation, use `trly apply --change <change> --task <task-id>`. For packed-vs-full context measurement, use `trly pack-benchmark --eval-set <file>`.
 
 Example managed block:
 
@@ -274,11 +283,10 @@ Example managed block:
 ## Task Relay Delegation
 
 - primary: codex
-- mode: hybrid
-- sub-agent: deepseek
 - scope: project
-- models:
-  - deepseek: deepseek-v4-pro[1m]
+- features: review, apply
+- review-chain: claude=claude-opus-4-8, deepseek=deepseek-v4-pro[1m]
+- apply-chain: deepseek=deepseek-v4-pro[1m]
 <!-- task-relay:end -->
 ```
 
@@ -292,12 +300,60 @@ Run a raw prompt against an agent target.
 trly run (--target {claude,codex,deepseek} | --targets TARGETS)
          (--prompt TEXT | --prompt-file PATH | --stdin)
          [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--cwd DIR]
+         [--expect-output PATH ...] [--isolate] [--allow-dirty]
 ```
 
 - `--target` / `--targets` — mutually exclusive; `--targets` accepts comma-separated fallback list
 - `--prompt` / `--prompt-file` / `--stdin` — mutually exclusive input source
 - `--model` — override the default model for the agent
 - `--timeout` — subprocess timeout in seconds (default: 1800)
+- `--expect-output PATH` — repeatable; after the run, verify the agent created this non-empty file and fail loudly otherwise (backstops the review path, which has no checkbox)
+- `--isolate` — run the delegate in an ephemeral git worktree on a throwaway branch `tr/<id>` with `git push` neutralized; its edits never touch the real working tree, and the primary reviews/merges the branch. An empty branch fails loudly.
+- `--allow-dirty` — with `--isolate`, proceed from clean `HEAD` even if the main working tree has local changes; without it, a dirty tree stops the delegation before any worktree/branch is created.
+
+### `trly pack`
+
+Generate a delegation packet for a mode/change with the change's OpenSpec artifacts inlined,
+so the delegate does not cold-start re-explore the repo.
+
+```
+trly pack --mode {review-proposal,implementation-draft,test-draft,review,diagnosis}
+          --change CHANGE [--task TASK] [--read PATH ...] [--full-change-context]
+          [--diff-file FILE | --diff-from REF]
+          [--model-resolver [--model-call-limit N] [--model-result FILE]]
+          [--dry-run --json] [--out FILE] [--cwd DIR]
+```
+
+- `--change` — OpenSpec change name under `openspec/changes/`
+- 預設會只 inline 目標 task block、`design.md` 的關鍵段落，以及相關 delta spec；若無法判斷 spec 關聯性，會 fallback 到所有 specs，並在 packet header 顯示 `Scope note:`
+- `--read PATH` — repeatable; inline an extra repo file (errors if unresolvable)
+- `--full-change-context` — restore the previous whole-change inline behavior
+- `--diff-file FILE` / `--diff-from REF` — for `test-draft`, add changed repo files as point-to references and report the dynamic source in dry-run diagnostics
+- `--model-resolver` — opt-in last-resort resolver for ambiguous spec selection; default is off. Accepted model selections can now add spec picks, design sections, task dependencies, and extra reads.
+- `--model-call-limit N` — per-pack model resolver call limit; `0` records a skipped resolver instead of calling a model
+- `--model-result FILE` — structured resolver result JSON for validation/testing without a live model call
+- `--dry-run --json` — report selected sections, estimated bytes, selection mode, spec candidates, missing signals, repo context gaps, dynamic diff source, model resolver diagnostics, budget status, budget limit, and trimmed sections without emitting the full packet
+- `--out` — write to a file instead of stdout; the result is consumable by `trly run --prompt-file`
+
+Packer defaults now enforce a byte budget per mode. Optional context is trimmed deterministically in this order: model extra reads, CLI extra reads, dynamic diff refs, non-core design sections, then lower-ranked specs. If required core context still exceeds budget, `build_packet()` fails with a machine-readable budget violation.
+
+### `trly pack-lint`
+
+Run advisory diagnostics for packer signals, fallback behavior, budget trimming, and JSON-only sidecar traps.
+
+```
+trly pack-lint --change CHANGE [--task TASK] [--mode MODE] --json [--cwd DIR]
+```
+
+### `trly pack-metrics`
+
+Evaluate scope selection against a labeled eval set. The eval set is JSON with `examples[]`; each example records the task, expected specs/task blocks/design sections/repo files, category, and evidence.
+
+```
+trly pack-metrics --eval-set tests/fixtures/packer_eval.json --json [--cwd DIR]
+```
+
+The report includes compatibility metrics plus nested `selection_accuracy`, `context_cost`, and `quality_outcome` sections.
 
 ### `trly evaluate`
 
@@ -349,38 +405,23 @@ Output (all agents):
 
 ### `trly install` / `trly uninstall`
 
-Manage task-relay delegation guidance via interactive wizard or non-interactive flags.
+Manage task-relay delegation guidance via interactive wizard or non-interactive flags. See **[docs/install.md](docs/install.md)** for full details.
 
 ```
-trly install [--primary {claude,codex} | --targets TARGETS] [--scope {user,project}]
-             [--mode {main,hybrid,delegated-apply}] [--sub-agent {claude,codex,deepseek}]
-             [--model ROLE=MODEL_ID ...] [--cwd DIR]
+trly install [--targets TARGETS] [--scope {user,project}]
+             [--feature FEATURES] [--review-chain CHAIN] [--apply-chain CHAIN] [--cwd DIR]
 trly uninstall [--scope {user,project}] [--cwd DIR]
 ```
 
-Run `trly install` without flags to launch the interactive wizard. Use Space to toggle install targets, then Up/Down and Enter for the remaining prompts:
+**Quick reference:**
 
-1. **Installation targets** — `claude`, `codex`, or both (determines which guidance files and skill paths are written)
-2. **Scope** — `user` (`~/.claude/` / `~/.codex/`) or `project` (`./`)
-3. **Mode** — `main` (clear + exit), `hybrid`, or `delegated-apply`
-4. **Sub-agent** — `claude`, `codex`, or `deepseek` for delegated work
-5. **Sub-agent model** — select from the up-to-date catalog for the delegated sub-agent only
-
-All flags are optional in an interactive terminal. In non-interactive environments, provide `--primary` or `--targets`, `--scope`, `--mode`, and `--sub-agent` when the mode is not `main` to skip the wizard.
-
-Install paths:
-
-| Primary | Scope   | Guidance file        | Skill root        |
-|---------|---------|----------------------|-------------------|
-| claude  | user    | `~/.claude/CLAUDE.md` | `~/.claude/skills` |
-| claude  | project | `./CLAUDE.md`        | `./.claude/skills` |
-| codex   | user    | `~/.codex/AGENTS.md` | `~/.codex/skills` |
-| codex   | project | `./AGENTS.md`        | `./.codex/skills` |
-
-Delegation modes:
-- **main** — no automatic delegation; clears any existing managed block
-- **hybrid** — orchestration of bounded delegated work (recommended)
-- **delegated-apply** — primary model delegates full apply to sub-agent and verifies
+| 旗標 | 說明 |
+|------|------|
+| `--targets` | 逗號分隔的安裝目標：`claude,codex` |
+| `--scope` | `user`（全域）或 `project`（當前專案） |
+| `--feature` | 啟用功能：`review,apply`；或 `none` 清除委派 |
+| `--review-chain` | Review agent 鏈：`agent=model,agent` |
+| `--apply-chain` | Apply agent 鏈：`agent=model,agent` |
 
 ## How outcome routing works
 

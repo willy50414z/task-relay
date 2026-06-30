@@ -1,0 +1,33 @@
+{
+  "decision": "REVISE",
+  "confidence": 0.8,
+  "summary": "From an engineering-feasibility standpoint the change is sound and correctly bounded (deterministic-first pipeline, no new vector DB, bytes-with-optional-trace benchmark). However several implementation-critical decisions are still unresolved in the artifacts and block a clean, testable build: (1) the PacketPlan construction/mutation pattern under new budget fields, (2) the budget origin AND its measurement unit (bytes vs token estimate) which the design currently mixes, (3) whether actual token/cost is read from delegate trace or estimated-first, and (4) the lack of a trimmed-packet integrity test. The prior CEO arbiter explicitly deferred the frozen-dataclass blast radius and the trimmed-packet integration test to eng-review; this arbitration promotes both to binding. The quality-proxy schema and sidecar-format items are already bound by the CEO arbiter and are not re-litigated here.",
+  "actionable_items": [
+    {
+      "target_artifact": "design.md",
+      "required_change": "Decide and document the PacketPlan construction pattern under the new budget fields (budget_status, trimmed_sections, budget_limit). State explicitly whether PacketPlan stays frozen (new fields populated at construction by plan_packet, with build_packet/to_report only reading them) or becomes a two-phase build (immutable selection result + a separate budget/trim result), and enumerate the call sites that change. Trimming must happen in a defined stage rather than mutating a frozen instance ad hoc.",
+      "acceptance_criteria": "design.md names the chosen pattern, lists the affected functions (plan_packet, build_packet, to_report and any constructors), and confirms no construction site is left passing a stale signature; tasks 2.1-2.3 reference this pattern as their structural basis."
+    },
+    {
+      "target_artifact": "design.md",
+      "required_change": "Resolve the budget measurement unit and origin together. The design currently references both byte_estimate and 'token estimate' for the same budget; pick the unit the trim loop actually enforces (bytes, or a single defined token-estimate function) and name the single configuration source (e.g. budget_bytes sidecar field and/or --packet-budget flag), its default, and hard-vs-soft semantics. Ensure specs/context-packer-budgeting/spec.md uses that same unit for 'configured budget'.",
+      "acceptance_criteria": "design.md and specs/context-packer-budgeting/spec.md agree on one budget unit and one configuration origin with a stated default and hard/soft behavior; no artifact references an undefined 'configured budget' or mixes bytes and tokens for the same threshold."
+    },
+    {
+      "target_artifact": "design.md",
+      "required_change": "Close the Open Question on actual token/cost sourcing by committing to an estimate-first contract with optional trace enrichment: define the deterministic estimation used when no trace exists and where trace usage is read from when available, so benchmark (tasks 3.1-3.2) is implementable without requiring live delegate integration. Remove this from Open Questions.",
+      "acceptance_criteria": "design.md states the estimate-first path and the optional trace path with a clear unavailable marker, consistent with the context-packer-benchmarking spec's available/unavailable scenarios; task 3.2 no longer depends on an unresolved trace decision."
+    },
+    {
+      "target_artifact": "tasks.md",
+      "required_change": "Add an integration test task verifying that build_packet() output after trimming is still a structurally valid delegate prompt: template sections intact, no dangling references to trimmed content, and no empty inlined-context blocks. This guards against trimming silently corrupting the assembled packet.",
+      "acceptance_criteria": "tasks.md contains a new test task (under section 2 or 3) asserting a trimmed packet renders a valid, non-corrupt prompt; it is distinct from the unit-level trimming-order test in 2.4."
+    },
+    {
+      "target_artifact": "specs/context-packer-semantic-assembly/spec.md",
+      "required_change": "Specify the interaction between CLI-supplied extra_reads (existing plan_packet parameter) and model-fallback-proposed extra_reads: define whether they are additive, deduplicated, or precedence-ordered, and state their relative position in the deterministic trim order so the dual-source data flow is unambiguous for implementation.",
+      "acceptance_criteria": "spec.md adds a scenario covering combined CLI + model extra_reads with defined merge/precedence, and the trim ordering stays consistent with specs/context-packer-budgeting/spec.md (optional extra reads trimmed before required task/core spec context)."
+    }
+  ],
+  "conflict_resolution": "Single reviewer (deepseek:/review, CONCERNS); no inter-reviewer conflict. Conflict to adjudicate is between the prior CEO arbiter's deferral and eng ownership: the CEO arbiter deferred the PacketPlan frozen-dataclass blast radius (medium) and the trimmed-packet integration test (low) to eng-review. As the engineering-feasibility arbiter this arbitration adopts both as binding, since the construction pattern is a prerequisite for tasks 2.1-2.3 and the integration test closes a real prompt-corruption gap not covered by 1.4/2.4/3.5. The budget item is retained as binding but reframed around the unit-vs-origin consistency that affects the trim loop's data flow. The trace-sourcing open question (design feasibility) is promoted to binding because tasks 3.1-3.2 are otherwise unimplementable as scoped. The quality-proxy schema and sidecar-format items remain bound by the CEO arbiter and are not duplicated here."
+}

@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 from task_relay.agents.common import resolve_cli, run_subprocess
 from task_relay.errors import AgentExecutionError
@@ -64,4 +65,25 @@ class DeepSeekRunner:
         )
 
     def check(self) -> TargetStatus:
+        token = os.environ.get("DEEPSEEK_AUTH_TOKEN", "").strip()
+        if not token:
+            return TargetStatus(ok=False, reason="DEEPSEEK_AUTH_TOKEN is not set")
+        binary = resolve_cli("claude")
+        try:
+            result = subprocess.run(
+                [binary, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                input="",
+            )
+        except FileNotFoundError:
+            return TargetStatus(ok=False, reason="claude CLI not found on PATH")
+        except subprocess.TimeoutExpired:
+            return TargetStatus(ok=False, reason="claude --version timed out")
+        except Exception as exc:
+            return TargetStatus(ok=False, reason=str(exc)[:200])
+        if result.returncode != 0:
+            reason = result.stderr.strip() or result.stdout.strip() or "claude CLI probe failed"
+            return TargetStatus(ok=False, reason=reason[:200])
         return TargetStatus(ok=True)

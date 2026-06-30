@@ -32,9 +32,25 @@ and implementation plan completeness from an objective perspective.
 - If there are alternative approaches worth considering, present them but let the user decide.
 
 ## Output
-- Write review findings to `spec/delegation_review.md`
-- Format: structured report with each finding tagged by severity (blocker / major / minor / suggestion)
-- Each finding must include: problem description, impact scope, suggested direction for resolution
+- Write review JSON to the unique path declared by the invoking CLI.
+- Output JSON only. No prose before or after the JSON object.
+- Schema:
+
+```json
+{
+  "reviewer": "agent:/persona",
+  "verdict": "PASS | CONCERNS | BLOCKED",
+  "summary": "short summary",
+  "findings": [
+    {
+      "severity": "critical | high | medium | low",
+      "area": "architecture | security | qa | scope | tests",
+      "description": "problem statement",
+      "recommendation": "concrete next step"
+    }
+  ]
+}
+```
 
 ## Non-goals
 - Do not modify OpenSpec state or mark tasks.md checkboxes.

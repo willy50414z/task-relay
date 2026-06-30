@@ -1,0 +1,43 @@
+{
+  "reviewer": "deepseek:/review",
+  "verdict": "CONCERNS",
+  "summary": "Proposal identifies real contract mismatches in model fallback and missing budget/benchmark capabilities. Direction is sound (deterministic-first, three-layer benchmark, JSON-only sidecar). However, the budget configuration mechanism is unspecified, the three-layer quality_outcome schema is deferred design, and the PacketPlan frozen-dataclass refactoring impact is not addressed. These gaps should be resolved before implementation begins.",
+  "findings": [
+    {
+      "severity": "high",
+      "area": "scope",
+      "description": "Budget configuration mechanism is never specified. Design describes budget_status, trimmed_sections, and budget_limit_bytes fields, but does not define how users configure the budget limit (CLI flag, sidecar field, env var, or hardcoded constant). Tasks 2.1-2.4 cannot be meaningfully scoped without this decision.",
+      "recommendation": "Add a concrete budget configuration spec: define where the limit comes from (e.g., --packet-budget flag on trly pack, or a budget_bytes field in packer.json sidecar), what the default is, and whether it is a hard or soft limit."
+    },
+    {
+      "severity": "medium",
+      "area": "architecture",
+      "description": "PacketPlan is a frozen dataclass constructed in plan_packet() and consumed by build_packet() and to_report(). Adding budget_status, trimmed_sections, and budget_limit_bytes changes the constructor signature and every call site. The design mentions adding these fields but does not address the refactoring impact on the frozen dataclass pattern.",
+      "recommendation": "Document in design.md whether PacketPlan stays frozen (new fields added to __init__ and all construction sites updated) or is converted to a mutable pattern with post-construction budget mutation. Estimate the blast radius before implementing task 2.1."
+    },
+    {
+      "severity": "medium",
+      "area": "scope",
+      "description": "The three-layer benchmark's quality_outcome layer lists abstract metrics (review artifact completeness, apply verification pass rate, fallback/retry rate) but the spec never defines concrete, machine-readable quality proxy field schemas. Task 3.3 says 'define machine-readable downstream quality proxy fields' but there is no spec requirement covering what those fields actually are.",
+      "recommendation": "Add a spec under context-packer-benchmarking that defines the concrete quality proxy schema (e.g., review_artifact_sections_present, apply_exit_code, retry_count, verification_passed). Otherwise task 3.3 cannot be verified as complete."
+    },
+    {
+      "severity": "medium",
+      "area": "scope",
+      "description": "Open question about sidecar format (YAML parser vs JSON-only contract) is listed in design.md with a recommendation toward JSON-only, but task 4.1 presents it as an unresolved decision point. This creates ambiguity: the implementer does not know whether to add a YAML dependency or to rename/restrict .yml/.yaml handling.",
+      "recommendation": "Resolve the open question in design.md before starting task 4.1. If JSON-only is chosen, specify the exact behavior for .yml/.yaml files (reject with clear error, or silently ignore). Update tasks.md accordingly."
+    },
+    {
+      "severity": "low",
+      "area": "scope",
+      "description": "extra_reads appears both as a direct plan_packet() parameter (user-supplied via CLI) and as a proposed model fallback return field (packer-semantic-assembly spec). The interaction between these two sources is not addressed: should they merge, should one override the other, and how does trimming treat each source?",
+      "recommendation": "Clarify in the semantic assembly spec whether model-proposed extra_reads and CLI-specified extra_reads are additive, exclusive, or prioritized differently during trimming. Add a scenario covering the combined case."
+    },
+    {
+      "severity": "low",
+      "area": "tests",
+      "description": "Tasks include regression tests (1.4), budget tests (2.4), and benchmark fixture tests (3.5), but no task explicitly covers integration testing of trimmed packet output — specifically verifying that a trimmed packet still produces a syntactically valid delegate prompt that downstream delegation can consume without errors.",
+      "recommendation": "Add a task for integration testing: verify that build_packet() output after trimming is still a valid prompt (template sections intact, no broken references, no empty inlined context blocks). This guards against trimming causing silent prompt corruption."
+    }
+  ]
+}

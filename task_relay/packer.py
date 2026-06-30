@@ -1,8 +1,4 @@
-"""Generate delegation packets with scoped OpenSpec context.
-
-The delegate runs cold each invocation, so the packet carries selected OpenSpec
-context and points to repo files the delegate can read from its worktree.
-"""
+"""Generate delegation packets with scoped OpenSpec context."""
 
 from __future__ import annotations
 
@@ -28,8 +24,17 @@ VALID_MODES = (
     "diagnosis",
 )
 _CORE_ARTIFACTS = ("proposal.md", "design.md", "tasks.md")
-_DESIGN_SECTION_TITLES = ("Decisions", "Risks / Trade-offs", "Open Questions")
+_DEFAULT_DESIGN_SECTION_TITLES = ("Decisions", "Risks / Trade-offs", "Open Questions")
 _SIDECAR_NAMES = ("packer.yml", "packer.yaml", "packer.json")
+_MODE_BUDGET_BYTES = {
+    "review-proposal": 48_000,
+    "review-arbiter": 48_000,
+    "implementation-draft": 24_000,
+    "test-draft": 28_000,
+    "review": 24_000,
+    "diagnosis": 24_000,
+}
+_MODEL_SELECTOR_FIELDS = {"specs", "design_sections", "task_dependencies", "extra_reads", "reason"}
 _STOPWORDS = {
     "a", "an", "and", "as", "at", "be", "by", "for", "from", "if", "in", "into",
     "is", "it", "of", "on", "or", "so", "that", "the", "this", "to", "when", "with",
@@ -54,6 +59,10 @@ class RepoReference:
     source: str
     reason: str
 
+    @property
+    def byte_count(self) -> int:
+        return len(self.path.encode("utf-8")) + len(self.reason.encode("utf-8"))
+
 
 @dataclass(frozen=True)
 class SpecCandidate:
@@ -72,13 +81,49 @@ class SpecCandidate:
 
 
 @dataclass(frozen=True)
+class TrimmedSection:
+    label: str
+    source: str
+    bytes: int
+    reason: str
+
+    def to_report(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "source": self.source,
+            "bytes": self.bytes,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class SpecSelection:
     sections: tuple[PacketSection, ...]
     candidates: tuple[SpecCandidate, ...]
+    design_section_titles: tuple[str, ...] = ()
+    task_dependencies: tuple[str, ...] = ()
+    extra_reads: tuple[str, ...] = ()
+    core_spec_paths: tuple[str, ...] = ()
     scope_note: str | None = None
     fallback_reason: str | None = None
     selection_mode: str = "deterministic"
     model_resolution: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    sections: tuple[PacketSection, ...]
+    repo_references: tuple[RepoReference, ...]
+    core_section_labels: tuple[str, ...]
+    core_repo_reference_paths: tuple[str, ...]
+    model_extra_reads: tuple[str, ...]
+    scope_note: str | None
+    fallback_reason: str | None
+    selection_mode: str
+    spec_candidates: tuple[SpecCandidate, ...]
+    missing_signals: tuple[str, ...]
+    repo_context_gap: tuple[str, ...]
+    model_resolution: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -117,6 +162,9 @@ class PacketPlan:
     dynamic_diff_source: str | None = None
     model_resolution: dict[str, Any] | None = None
     resolver_cache_key: str | None = None
+    budget_status: str = "not_applicable"
+    budget_limit_bytes: int | None = None
+    trimmed_sections: tuple[TrimmedSection, ...] = ()
 
     @property
     def byte_estimate(self) -> int:
@@ -124,7 +172,7 @@ class PacketPlan:
         note = len((self.scope_note or "").encode("utf-8"))
         body = sum(section.byte_count for section in self.sections)
         labels = sum(len(section.label.encode("utf-8")) for section in self.sections)
-        refs = sum(len(ref.path.encode("utf-8")) + len(ref.reason.encode("utf-8")) for ref in self.repo_references)
+        refs = sum(ref.byte_count for ref in self.repo_references)
         return header + note + body + labels + refs
 
     def to_report(self, *, mode: str, change: str, task: str | None, full_change_context: bool) -> dict[str, object]:
@@ -137,6 +185,9 @@ class PacketPlan:
             "scope_note": self.scope_note,
             "fallback_reason": self.fallback_reason,
             "byte_estimate": self.byte_estimate,
+            "budget_status": self.budget_status,
+            "budget_limit_bytes": self.budget_limit_bytes,
+            "trimmed_sections": [item.to_report() for item in self.trimmed_sections],
             "spec_candidates": [candidate.to_report() for candidate in self.spec_candidates],
             "missing_signals": list(self.missing_signals),
             "repo_context_gap": list(self.repo_context_gap),
@@ -160,9 +211,7 @@ class PacketPlan:
 
 def _load_template(mode: str) -> str:
     if mode not in VALID_MODES:
-        raise PacketGenerationError(
-            f"unknown mode '{mode}'. Valid modes: {', '.join(VALID_MODES)}"
-        )
+        raise PacketGenerationError(f"unknown mode '{mode}'. Valid modes: {', '.join(VALID_MODES)}")
     asset = resources.files("task_relay.assets").joinpath(f"{SKILL_NAME}/templates/{mode}.md")
     if not asset.is_file():
         raise PacketGenerationError(f"template for mode '{mode}' is missing from the package")
@@ -185,12 +234,6 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", title.strip().lower())
 
 
-def _normalize_task_signal(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
-
-
 def _load_signals(change_dir: Path) -> PackerSignals:
     for name in _SIDECAR_NAMES:
         path = change_dir / name
@@ -203,17 +246,19 @@ def _load_signals(change_dir: Path) -> PackerSignals:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
             raise PacketGenerationError(
-                f"packer signals sidecar {path} must use JSON-compatible YAML in this version: {exc}"
+                f"packer sidecar {path} must contain JSON syntax. "
+                "This release does not accept general YAML in `packer.yml` or `packer.yaml`. "
+                f"Migration: rewrite the file as JSON. Parse error: {exc}"
             ) from exc
         if not isinstance(payload, dict):
-            raise PacketGenerationError(f"packer signals sidecar {path} must contain an object")
+            raise PacketGenerationError(f"packer sidecar {path} must contain a JSON object")
         return PackerSignals(path=path, raw=payload)
     return PackerSignals(path=None, raw={})
 
 
 def _extract_design_sections(path: Path, titles: tuple[str, ...] | list[str] | None = None) -> list[PacketSection]:
     lines = _read_text(path).splitlines()
-    target_titles = tuple(titles) if titles is not None else _DESIGN_SECTION_TITLES
+    target_titles = tuple(titles) if titles is not None else _DEFAULT_DESIGN_SECTION_TITLES
     targets = {_normalize_title(title): title for title in target_titles}
     sections: list[PacketSection] = []
     index = 0
@@ -235,11 +280,7 @@ def _extract_design_sections(path: Path, titles: tuple[str, ...] | list[str] | N
                 break
             end += 1
         block = "\n".join(lines[index:end]).strip()
-        sections.append(PacketSection(
-            label=f"design.md :: {targets[normalized]}",
-            text=block,
-            source=path.name,
-        ))
+        sections.append(PacketSection(label=f"design.md :: {targets[normalized]}", text=block, source="design.md"))
         index = end
     return sections
 
@@ -314,7 +355,7 @@ def _score_specs(change_dir: Path, task_context: str) -> list[tuple[int, Path]]:
         haystack = f"{spec.parent.name} {spec.stem} {_read_text(spec)}".lower()
         score = sum(1 for token in tokens if token in haystack)
         scores.append((score, spec))
-    scores.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+    scores.sort(key=lambda item: (-item[0], str(item[1])))
     return scores
 
 
@@ -347,6 +388,45 @@ def _coerce_list(value: Any) -> list[str]:
     return []
 
 
+def _normalized_unique(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return tuple(ordered)
+
+
+def _core_spec_paths_from_scores(scores: list[tuple[int, Path]], selected: tuple[str, ...], change_dir: Path) -> tuple[str, ...]:
+    if not selected:
+        return ()
+    selected_set = set(selected)
+    ranked = [
+        (score, str(spec.relative_to(change_dir)))
+        for score, spec in scores
+        if str(spec.relative_to(change_dir)) in selected_set
+    ]
+    if not ranked:
+        return ()
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return (ranked[0][1],)
+
+
+def _merge_model_resolution(base: dict[str, Any] | None, updates: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in updates.items():
+        if key == "accepted_fields" and isinstance(value, list):
+            merged[key] = sorted(set(merged.get(key, [])) | set(value))
+        elif key == "rejected_fields" and isinstance(value, list):
+            merged[key] = sorted(set(merged.get(key, [])) | set(value))
+        else:
+            merged[key] = value
+    return merged
+
+
 def _select_explicit_specs(change_dir: Path, task_signal: dict[str, Any], scores: list[tuple[int, Path]]) -> SpecSelection | None:
     capability = task_signal.get("capability")
     if not isinstance(capability, str) or not capability.strip():
@@ -356,6 +436,7 @@ def _select_explicit_specs(change_dir: Path, task_signal: dict[str, Any], scores
         return SpecSelection(
             sections=tuple(_all_spec_sections(change_dir)),
             candidates=_candidate_reports(scores, change_dir),
+            core_spec_paths=(),
             scope_note=f"declared capability '{capability}' did not resolve; included all delta specs.",
             fallback_reason="invalid_explicit_capability",
             selection_mode="explicit_mapping",
@@ -364,6 +445,7 @@ def _select_explicit_specs(change_dir: Path, task_signal: dict[str, Any], scores
     return SpecSelection(
         sections=(_spec_section(spec, change_dir),),
         candidates=_candidate_reports(scores, change_dir, {rel}, source="explicit_mapping"),
+        core_spec_paths=(rel,),
         selection_mode="explicit_mapping",
     )
 
@@ -393,6 +475,7 @@ def _select_relevant_specs(
         return SpecSelection(
             sections=tuple(_all_spec_sections(change_dir)),
             candidates=_candidate_reports(scores, change_dir),
+            core_spec_paths=(),
             scope_note="no task context was available; included all delta specs.",
             fallback_reason="no_task_context",
         )
@@ -404,11 +487,14 @@ def _select_relevant_specs(
         return SpecSelection(
             sections=(_spec_section(best[0], change_dir),),
             candidates=_candidate_reports(scores, change_dir, {rel}),
+            core_spec_paths=(rel,),
         )
 
+    fallback_paths = tuple(str(spec.relative_to(change_dir)) for _score, spec in scores)
     fallback = SpecSelection(
         sections=tuple(_all_spec_sections(change_dir)),
         candidates=_candidate_reports(scores, change_dir),
+        core_spec_paths=_core_spec_paths_from_scores(scores, fallback_paths, change_dir),
         scope_note="capability relevance could not be resolved; included all delta specs.",
         fallback_reason="unresolved_capability_relevance",
     )
@@ -419,20 +505,12 @@ def _select_relevant_specs(
             **{**fallback.__dict__, "model_resolution": {"status": "skipped", "reason": "call_limit_exhausted"}}
         )
     if model_result is None:
-        model_result, call_meta = _call_model_resolver(
-            change_dir,
-            task_context,
-            scores,
-            task_id=task_id,
-            cwd=cwd,
-        )
+        model_result, call_meta = _call_model_resolver(change_dir, task_context, scores, task_id=task_id, cwd=cwd)
         if model_result is None:
             return SpecSelection(**{**fallback.__dict__, "model_resolution": call_meta})
         selected = _apply_model_selection(change_dir, scores, fallback, model_result)
-        if selected.model_resolution:
-            merged = {**selected.model_resolution, **{"call": call_meta}}
-            return SpecSelection(**{**selected.__dict__, "model_resolution": merged})
-        return selected
+        merged = _merge_model_resolution(selected.model_resolution, {"call": call_meta})
+        return SpecSelection(**{**selected.__dict__, "model_resolution": merged})
     return _apply_model_selection(change_dir, scores, fallback, model_result)
 
 
@@ -449,10 +527,7 @@ def _call_model_resolver(
     from task_relay.trace import append_trace_record, new_session_id
     from task_relay.types import AgentRunRequest
 
-    candidates = [
-        {"path": str(spec.relative_to(change_dir)), "score": score}
-        for score, spec in scores
-    ]
+    candidates = [{"path": str(spec.relative_to(change_dir)), "score": score} for score, spec in scores]
     prompt = (
         "Mode: `model-resolution`\n"
         f"Change: `{change_dir.name}`\n"
@@ -507,27 +582,101 @@ def _apply_model_selection(
     fallback: SpecSelection,
     model_result: dict[str, Any],
 ) -> SpecSelection:
-    specs = _coerce_list(model_result.get("specs"))
+    unknown_fields = sorted(set(model_result) - _MODEL_SELECTOR_FIELDS)
+    if unknown_fields:
+        return SpecSelection(
+            **{
+                **fallback.__dict__,
+                "model_resolution": {
+                    "status": "rejected",
+                    "reason": "unsupported_selector",
+                    "rejected_fields": unknown_fields,
+                },
+            }
+        )
+
     score_by_rel = {str(spec.relative_to(change_dir)): score for score, spec in scores}
-    invalid = [spec for spec in specs if spec not in score_by_rel]
-    if invalid:
+    specs = _normalized_unique(_coerce_list(model_result.get("specs")))
+    invalid_specs = [spec for spec in specs if spec not in score_by_rel]
+    if invalid_specs:
         return SpecSelection(
-            **{**fallback.__dict__, "model_resolution": {"status": "rejected", "reason": "invalid_pick", "invalid": invalid}}
+            **{
+                **fallback.__dict__,
+                "model_resolution": {
+                    "status": "rejected",
+                    "reason": "invalid_pick",
+                    "rejected_fields": ["specs"],
+                    "invalid": invalid_specs,
+                },
+            }
         )
-    grounded = [spec for spec in specs if score_by_rel.get(spec, 0) > 0]
-    if not grounded:
+
+    design_sections = _normalized_unique(_coerce_list(model_result.get("design_sections")))
+    task_dependencies = _normalized_unique(_coerce_list(model_result.get("task_dependencies")))
+    extra_reads = _normalized_unique(_coerce_list(model_result.get("extra_reads")))
+    grounded_specs = tuple(spec for spec in specs if score_by_rel.get(spec, 0) > 0)
+    has_semantic_fields = bool(design_sections or task_dependencies or extra_reads)
+    if specs and not grounded_specs:
         return SpecSelection(
-            **{**fallback.__dict__, "model_resolution": {"status": "rejected", "reason": "unsupported_pick"}}
+            **{
+                **fallback.__dict__,
+                "model_resolution": {
+                    "status": "rejected",
+                    "reason": "unsupported_pick",
+                    "rejected_fields": ["specs"],
+                },
+            }
         )
-    sections = tuple(_spec_section(change_dir / spec, change_dir) for spec in specs)
+    if not grounded_specs and not has_semantic_fields:
+        return SpecSelection(
+            **{
+                **fallback.__dict__,
+                "model_resolution": {
+                    "status": "rejected",
+                    "reason": "empty_selection",
+                    "rejected_fields": [],
+                },
+            }
+        )
+
+    selected_spec_set = set(grounded_specs) if grounded_specs else {candidate.path for candidate in fallback.candidates if candidate.selected}
+    if grounded_specs:
+        sections = tuple(_spec_section(change_dir / spec, change_dir) for spec in grounded_specs)
+        candidates = _candidate_reports(scores, change_dir, set(grounded_specs), source="model_fallback")
+        selection_mode = "model_fallback"
+        core_spec_paths = _core_spec_paths_from_scores(scores, grounded_specs, change_dir)
+    else:
+        sections = fallback.sections
+        candidates = fallback.candidates
+        selection_mode = fallback.selection_mode
+        core_spec_paths = fallback.core_spec_paths
+
+    accepted_fields: list[str] = []
+    if grounded_specs:
+        accepted_fields.append("specs")
+    if design_sections:
+        accepted_fields.append("design_sections")
+    if task_dependencies:
+        accepted_fields.append("task_dependencies")
+    if extra_reads:
+        accepted_fields.append("extra_reads")
+
     return SpecSelection(
         sections=sections,
-        candidates=_candidate_reports(scores, change_dir, set(specs), source="model_fallback"),
-        selection_mode="model_fallback",
+        candidates=candidates,
+        design_section_titles=design_sections,
+        task_dependencies=task_dependencies,
+        extra_reads=extra_reads,
+        core_spec_paths=core_spec_paths,
+        scope_note=fallback.scope_note if not grounded_specs else None,
+        fallback_reason=fallback.fallback_reason if not grounded_specs else None,
+        selection_mode=selection_mode,
         model_resolution={
             "status": "accepted",
             "reason": str(model_result.get("reason") or "model selected grounded candidates"),
-            "outlier_check": "soft",
+            "accepted_fields": sorted(accepted_fields),
+            "selected_specs": sorted(selected_spec_set),
+            "rejected_fields": [],
         },
     )
 
@@ -553,16 +702,12 @@ def _resolve_repo_reference(base: Path, rel_path: str, source: str, reason: str)
     return RepoReference(path=display, source=source, reason=reason), None
 
 
-def _task_dependencies(tasks_path: Path, task_signal: dict[str, Any]) -> tuple[PacketSection, ...]:
+def _task_dependencies(tasks_path: Path, dependencies: tuple[str, ...]) -> tuple[PacketSection, ...]:
     sections: list[PacketSection] = []
-    for dep in _coerce_list(task_signal.get("dependencies")):
+    for dep in dependencies:
         section, _heading = _extract_task_block(tasks_path, dep)
         if section is not None:
-            sections.append(PacketSection(
-                label=f"dependency {section.label}",
-                text=section.text,
-                source=section.source,
-            ))
+            sections.append(PacketSection(label=f"dependency {section.label}", text=section.text, source=section.source))
     return tuple(sections)
 
 
@@ -573,9 +718,7 @@ def _dynamic_diff_paths(base: Path, *, diff_file: str | None = None, diff_from: 
             path = base / path
         if not path.is_file():
             raise PacketGenerationError(f"diff file '{diff_file}' could not be resolved at {path}")
-        text = _read_text(path)
-        paths = _paths_from_diff_text(text)
-        return paths, f"diff_file:{diff_file}"
+        return _paths_from_diff_text(_read_text(path)), f"diff_file:{diff_file}"
     if diff_from:
         completed = subprocess.run(
             ["git", "diff", "--name-only", diff_from, "--"],
@@ -607,11 +750,11 @@ def _paths_from_diff_text(text: str) -> list[str]:
             continue
         if not line.startswith(("+", "-")) and " " not in line:
             paths.append(line)
-    deduped: list[str] = []
-    for item in paths:
-        if item not in deduped:
-            deduped.append(item)
-    return deduped
+    return list(_normalized_unique(paths))
+
+
+def _merge_unique(primary: tuple[str, ...], secondary: tuple[str, ...]) -> tuple[str, ...]:
+    return _normalized_unique(list(primary) + list(secondary))
 
 
 def _scoped_sections(
@@ -621,39 +764,34 @@ def _scoped_sections(
     base: Path,
     signals: PackerSignals,
     dynamic_repo_files: list[str] | None = None,
-    dynamic_diff_source: str | None = None,
     model_resolver_enabled: bool = False,
     model_result: dict[str, Any] | None = None,
     model_call_limit: int = 1,
-) -> tuple[list[PacketSection], list[RepoReference], str | None, str | None, str, tuple[SpecCandidate, ...], list[str], list[str], dict[str, Any] | None]:
+) -> SelectionResult:
     sections: list[PacketSection] = []
     repo_refs: list[RepoReference] = []
     missing_signals: list[str] = []
     repo_context_gap: list[str] = []
+    core_section_labels: list[str] = []
+    core_repo_reference_paths: list[str] = []
 
     task_signal = signals.for_task(task)
     proposal = change_dir / "proposal.md"
     if task is None and proposal.is_file():
-        sections.append(PacketSection(label="proposal.md", text=_read_text(proposal), source="proposal.md"))
+        proposal_section = PacketSection(label="proposal.md", text=_read_text(proposal), source="proposal.md")
+        sections.append(proposal_section)
+        core_section_labels.append(proposal_section.label)
 
     tasks_path = change_dir / "tasks.md"
     heading_title = None
     task_text = ""
+    task_dependencies = _normalized_unique(_coerce_list(task_signal.get("dependencies")))
     if tasks_path.is_file():
         task_section, heading_title = _extract_task_block(tasks_path, task)
         if task_section is not None:
             sections.append(task_section)
+            core_section_labels.append(task_section.label)
             task_text = task_section.text
-        if task_signal:
-            sections.extend(_task_dependencies(tasks_path, task_signal))
-
-    design_path = change_dir / "design.md"
-    if design_path.is_file():
-        design_titles = list(_DESIGN_SECTION_TITLES)
-        for title in _coerce_list(task_signal.get("design_sections")):
-            if title not in design_titles:
-                design_titles.append(title)
-        sections.extend(_extract_design_sections(design_path, design_titles))
 
     spec_selection = _select_relevant_specs(
         change_dir,
@@ -665,7 +803,22 @@ def _scoped_sections(
         model_result=model_result,
         model_call_limit=model_call_limit,
     )
+
+    merged_dependencies = _merge_unique(task_dependencies, spec_selection.task_dependencies)
+    if tasks_path.is_file():
+        dependency_sections = _task_dependencies(tasks_path, merged_dependencies)
+        sections.extend(dependency_sections)
+        core_section_labels.extend(section.label for section in dependency_sections)
+
+    design_titles = _merge_unique(_DEFAULT_DESIGN_SECTION_TITLES, _coerce_list(task_signal.get("design_sections")))
+    design_titles = _merge_unique(design_titles, spec_selection.design_section_titles)
+    design_path = change_dir / "design.md"
+    if design_path.is_file():
+        design_sections = _extract_design_sections(design_path, design_titles)
+        sections.extend(design_sections)
+
     sections.extend(spec_selection.sections)
+    core_section_labels.extend(section.label for section in spec_selection.sections if section.source in set(spec_selection.core_spec_paths))
 
     if task and signals.path is None:
         missing_signals.append("sidecar_absent")
@@ -678,6 +831,7 @@ def _scoped_sections(
             repo_context_gap.append(missing or rel)
         else:
             repo_refs.append(ref)
+            core_repo_reference_paths.append(ref.path)
 
     for rel in dynamic_repo_files or []:
         ref, missing = _resolve_repo_reference(base, rel, "dynamic_diff", "changed file from explicit diff source")
@@ -686,17 +840,144 @@ def _scoped_sections(
         else:
             repo_refs.append(ref)
 
-    return (
-        sections,
-        repo_refs,
-        spec_selection.scope_note,
-        spec_selection.fallback_reason,
-        spec_selection.selection_mode,
-        spec_selection.candidates,
-        missing_signals,
-        repo_context_gap,
-        spec_selection.model_resolution,
+    return SelectionResult(
+        sections=tuple(sections),
+        repo_references=tuple(repo_refs),
+        core_section_labels=tuple(_normalized_unique(core_section_labels)),
+        core_repo_reference_paths=tuple(_normalized_unique(core_repo_reference_paths)),
+        model_extra_reads=spec_selection.extra_reads,
+        scope_note=spec_selection.scope_note,
+        fallback_reason=spec_selection.fallback_reason,
+        selection_mode=spec_selection.selection_mode,
+        spec_candidates=spec_selection.candidates,
+        missing_signals=tuple(missing_signals),
+        repo_context_gap=tuple(repo_context_gap),
+        model_resolution=spec_selection.model_resolution,
     )
+
+
+def _resolve_extra_read_sections(base: Path, reads: tuple[str, ...], *, source: str) -> tuple[list[PacketSection], list[str]]:
+    sections: list[PacketSection] = []
+    missing: list[str] = []
+    for read in reads:
+        path = Path(read)
+        if not path.is_absolute():
+            path = base / path
+        if not path.is_file():
+            missing.append(read)
+            continue
+        label = read
+        sections.append(PacketSection(label=label, text=_read_text(path), source=source))
+    return sections, missing
+
+
+def _resolve_budget_limit(mode: str, signals: PackerSignals) -> int:
+    raw = signals.raw.get("budget_bytes")
+    if raw is None:
+        return _MODE_BUDGET_BYTES[mode]
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PacketGenerationError(f"sidecar budget_bytes must be an integer, got {raw!r}") from exc
+    if limit <= 0:
+        raise PacketGenerationError("sidecar budget_bytes must be positive")
+    return limit
+
+
+def _estimated_tokens(byte_count: int) -> int:
+    return max(1, round(byte_count / 4)) if byte_count > 0 else 0
+
+
+def _section_removal_priority(section: PacketSection, core_labels: set[str], score_by_spec: dict[str, int]) -> tuple[int, int, str]:
+    if section.label in core_labels:
+        return (999, 0, section.label)
+    if section.source == "extra_read:model":
+        return (0, 0, section.label)
+    if section.source == "extra_read:cli":
+        return (1, 0, section.label)
+    if section.source == "design.md":
+        return (3, 0, section.label)
+    if section.source.startswith("specs/"):
+        return (4, score_by_spec.get(section.source, 0), section.source)
+    return (998, 0, section.label)
+
+
+def _repo_ref_removal_priority(ref: RepoReference, core_paths: set[str]) -> tuple[int, str]:
+    if ref.path in core_paths:
+        return (999, ref.path)
+    if ref.source == "dynamic_diff":
+        return (2, ref.path)
+    return (998, ref.path)
+
+
+def _packet_byte_estimate(template: str, scope_note: str | None, sections: list[PacketSection], repo_references: list[RepoReference]) -> int:
+    header = len(template.encode("utf-8"))
+    note = len((scope_note or "").encode("utf-8"))
+    body = sum(section.byte_count + len(section.label.encode("utf-8")) for section in sections)
+    refs = sum(ref.byte_count for ref in repo_references)
+    return header + note + body + refs
+
+
+def _apply_budget(
+    *,
+    template: str,
+    scope_note: str | None,
+    sections: tuple[PacketSection, ...],
+    repo_references: tuple[RepoReference, ...],
+    core_section_labels: tuple[str, ...],
+    core_repo_reference_paths: tuple[str, ...],
+    budget_limit_bytes: int,
+    spec_candidates: tuple[SpecCandidate, ...],
+) -> tuple[tuple[PacketSection, ...], tuple[RepoReference, ...], str, tuple[TrimmedSection, ...]]:
+    current_sections = list(sections)
+    current_refs = list(repo_references)
+    if _packet_byte_estimate(template, scope_note, current_sections, current_refs) <= budget_limit_bytes:
+        return tuple(current_sections), tuple(current_refs), "within_budget", ()
+
+    core_labels = set(core_section_labels)
+    core_paths = set(core_repo_reference_paths)
+    score_by_spec = {candidate.path: candidate.score for candidate in spec_candidates}
+    trimmed: list[TrimmedSection] = []
+
+    removable_items: list[tuple[tuple[int, int, str], str, PacketSection | RepoReference]] = []
+    removable_items.extend(
+        (
+            _section_removal_priority(section, core_labels, score_by_spec),
+            "section",
+            section,
+        )
+        for section in current_sections
+        if section.label not in core_labels
+    )
+    removable_items.extend(
+        (
+            (_repo_ref_removal_priority(ref, core_paths)[0], 0, _repo_ref_removal_priority(ref, core_paths)[1]),
+            "ref",
+            ref,
+        )
+        for ref in current_refs
+        if ref.path not in core_paths
+    )
+    removable_items.sort(key=lambda item: item[0])
+
+    for _priority, kind, value in removable_items:
+        if _packet_byte_estimate(template, scope_note, current_sections, current_refs) <= budget_limit_bytes:
+            break
+        if kind == "section":
+            section = value
+            if section not in current_sections:
+                continue
+            current_sections.remove(section)
+            trimmed.append(TrimmedSection(label=section.label, source=section.source, bytes=section.byte_count, reason="budget_trim"))
+            continue
+        ref = value
+        if ref not in current_refs:
+            continue
+        current_refs.remove(ref)
+        trimmed.append(TrimmedSection(label=ref.path, source=ref.source, bytes=ref.byte_count, reason="budget_trim"))
+
+    status = "trimmed" if _packet_byte_estimate(template, scope_note, current_sections, current_refs) <= budget_limit_bytes else "violation"
+    return tuple(current_sections), tuple(current_refs), status, tuple(trimmed)
 
 
 def _input_hash(
@@ -752,47 +1033,69 @@ def plan_packet(
         dynamic_files = []
         dynamic_source = None
 
-    repo_refs: list[RepoReference] = []
-    missing_signals: list[str] = []
-    repo_context_gap: list[str] = []
-    selection_mode = "deterministic"
-    spec_candidates: tuple[SpecCandidate, ...] = ()
-    model_resolution: dict[str, Any] | None = None
-
     if full_change_context:
-        sections = _full_change_sections(change_dir)
+        sections = tuple(_full_change_sections(change_dir))
+        repo_refs: tuple[RepoReference, ...] = ()
         scope_note = None
         fallback_reason = None
+        selection_mode = "full_change_context"
+        spec_candidates: tuple[SpecCandidate, ...] = ()
+        missing_signals: tuple[str, ...] = ()
+        repo_context_gap: tuple[str, ...] = ()
+        model_resolution = None
+        budget_status = "not_applicable"
+        budget_limit_bytes = None
+        trimmed_sections: tuple[TrimmedSection, ...] = ()
     else:
-        (
-            sections,
-            repo_refs,
-            scope_note,
-            fallback_reason,
-            selection_mode,
-            spec_candidates,
-            missing_signals,
-            repo_context_gap,
-            model_resolution,
-        ) = _scoped_sections(
+        selection = _scoped_sections(
             change_dir,
             task,
             base=base,
             signals=signals,
             dynamic_repo_files=dynamic_files,
-            dynamic_diff_source=dynamic_source,
             model_resolver_enabled=model_resolver_enabled,
             model_result=model_result,
             model_call_limit=model_call_limit,
         )
+        sections = selection.sections
+        repo_refs = selection.repo_references
+        scope_note = selection.scope_note
+        fallback_reason = selection.fallback_reason
+        selection_mode = selection.selection_mode
+        spec_candidates = selection.spec_candidates
+        missing_signals = selection.missing_signals
+        repo_context_gap = list(selection.repo_context_gap)
+        model_resolution = selection.model_resolution
 
-    for read in extra_reads or []:
-        path = Path(read)
-        if not path.is_absolute():
-            path = base / path
-        if not path.is_file():
-            raise PacketGenerationError(f"declared read '{read}' could not be resolved at {path}")
-        sections.append(PacketSection(label=read, text=_read_text(path), source=read))
+        model_extra_sections, missing_model_reads = _resolve_extra_read_sections(base, selection.model_extra_reads, source="extra_read:model")
+        cli_extra_sections, missing_cli_reads = _resolve_extra_read_sections(base, _normalized_unique(extra_reads or []), source="extra_read:cli")
+        repo_context_gap.extend(missing_model_reads)
+        if missing_model_reads:
+            model_resolution = _merge_model_resolution(model_resolution, {
+                "status": "rejected" if not model_extra_sections else model_resolution.get("status", "accepted") if model_resolution else "accepted",
+                "reason": "missing_extra_read" if not model_extra_sections else (model_resolution or {}).get("reason", "model selected grounded candidates"),
+                "rejected_fields": ["extra_reads"],
+                "missing_extra_reads": missing_model_reads,
+            })
+        if missing_cli_reads:
+            raise PacketGenerationError(f"declared read(s) could not be resolved: {', '.join(missing_cli_reads)}")
+
+        combined_sections = list(sections) + model_extra_sections + cli_extra_sections
+        core_section_labels = selection.core_section_labels
+        core_repo_reference_paths = selection.core_repo_reference_paths
+        budget_limit_bytes = _resolve_budget_limit(mode, signals)
+        trimmed_sections_list: tuple[TrimmedSection, ...]
+        sections, repo_refs, budget_status, trimmed_sections_list = _apply_budget(
+            template=template,
+            scope_note=scope_note,
+            sections=tuple(combined_sections),
+            repo_references=repo_refs,
+            core_section_labels=core_section_labels,
+            core_repo_reference_paths=core_repo_reference_paths,
+            budget_limit_bytes=budget_limit_bytes,
+            spec_candidates=spec_candidates,
+        )
+        trimmed_sections = trimmed_sections_list
 
     if not sections and not repo_refs:
         raise PacketGenerationError(f"change '{change}' has no packet context")
@@ -809,17 +1112,20 @@ def plan_packet(
 
     return PacketPlan(
         template=template,
-        sections=tuple(sections),
-        repo_references=tuple(repo_refs),
+        sections=sections,
+        repo_references=repo_refs,
         scope_note=scope_note,
         fallback_reason=fallback_reason,
         selection_mode=selection_mode,
         spec_candidates=spec_candidates,
-        missing_signals=tuple(missing_signals),
+        missing_signals=missing_signals,
         repo_context_gap=tuple(repo_context_gap),
         dynamic_diff_source=dynamic_source,
         model_resolution=model_resolution,
         resolver_cache_key=resolver_cache_key,
+        budget_status=budget_status,
+        budget_limit_bytes=budget_limit_bytes,
+        trimmed_sections=trimmed_sections,
     )
 
 
@@ -850,9 +1156,23 @@ def build_packet(
         model_result=model_result,
         model_call_limit=model_call_limit,
     )
+    if plan.budget_status == "violation":
+        raise PacketGenerationError(
+            json.dumps(
+                {
+                    "error": "packet_budget_violation",
+                    "budget_limit_bytes": plan.budget_limit_bytes,
+                    "byte_estimate": plan.byte_estimate,
+                },
+                ensure_ascii=False,
+            )
+        )
+
     parts = [plan.template.rstrip()]
     if plan.scope_note:
         parts.append(f"Scope note: {plan.scope_note}")
+    if plan.budget_status == "trimmed":
+        parts.append(f"Budget note: trimmed optional context to fit {plan.budget_limit_bytes} bytes.")
     if plan.repo_references:
         parts.append("## Referenced Repo Context")
         parts.extend(f"- `{ref.path}` ({ref.reason}; source: {ref.source})" for ref in plan.repo_references)

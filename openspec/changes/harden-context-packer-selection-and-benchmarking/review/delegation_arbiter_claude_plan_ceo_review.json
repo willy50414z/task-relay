@@ -1,0 +1,28 @@
+{
+  "decision": "REVISE",
+  "confidence": 0.82,
+  "summary": "The change targets a real and valuable product problem: proving context-packer actually reduces token cost without degrading downstream quality, and closing the gap between the model-fallback contract and real packet assembly. Scope is correctly bounded (deterministic-first, no new vector DB, three-layer benchmark). However, two product-critical decisions are still open inside the artifacts (budget configuration surface and sidecar format), and one new capability lacks a verifiable spec requirement (concrete quality-proxy schema). These must be resolved before implementation so acceptance is testable. The frozen-dataclass and extra_reads/integration concerns are valid but are implementation-detail risks better owned by eng review, not blocking from a product/scope standpoint.",
+  "actionable_items": [
+    {
+      "target_artifact": "design.md",
+      "required_change": "Resolve the budget configuration decision: state where the packet budget limit originates (e.g. a budget_bytes sidecar field and/or a --packet-budget flag on `trly pack`), the default value, and whether the limit is hard (enforced trimming) or soft (report-only). Remove this from Open Questions and reflect it in tasks 2.1-2.4 scope.",
+      "acceptance_criteria": "design.md names a single concrete configuration source, a default, and hard-vs-soft semantics; specs/context-packer-budgeting/spec.md is consistent with that decision and no longer references an undefined 'configured budget' without origin."
+    },
+    {
+      "target_artifact": "specs/context-packer-benchmarking/spec.md",
+      "required_change": "Add a requirement defining the concrete machine-readable downstream quality-proxy field schema (e.g. review_artifact_sections_present, apply_exit_code/verification_passed, retry_count) so the 'quality outcome' benchmark layer is verifiable. Task 3.3 currently has no spec requirement covering the actual field names.",
+      "acceptance_criteria": "spec.md enumerates the named quality-proxy fields with present/missing semantics, and task 3.3 can be checked complete by asserting those exact fields appear (or are explicitly marked missing) in the benchmark report."
+    },
+    {
+      "target_artifact": "design.md",
+      "required_change": "Close the sidecar-format open question by committing to one contract. Adopt the design's own JSON-only recommendation: specify that .yml/.yaml files are parsed as JSON and that non-JSON content is rejected with a clear lint/error message (not silently ignored). Update tasks.md 4.1 from a decision point to an implementation task.",
+      "acceptance_criteria": "design.md states the single chosen format contract, specs/lint behavior for .yml/.yaml is defined, and tasks.md 4.1 no longer presents the choice as unresolved."
+    },
+    {
+      "target_artifact": "specs/context-packer-semantic-assembly/spec.md",
+      "required_change": "Add a scenario clarifying the interaction between CLI-supplied extra_reads and model-fallback-proposed extra_reads (additive vs override) and how each is treated during budget trimming, so the dual-source behavior is specified rather than left ambiguous.",
+      "acceptance_criteria": "spec.md contains a scenario covering combined CLI + model extra_reads with defined merge/precedence and trimming order; the budgeting trim order in specs/context-packer-budgeting/spec.md remains consistent with it."
+    }
+  ],
+  "conflict_resolution": "Single reviewer (deepseek:/review, CONCERNS); no inter-reviewer conflict to adjudicate. Adopted resolution: the budget-configuration gap (high), the quality-proxy schema gap (medium), and the sidecar-format open question (medium) are promoted to binding because they block verifiability and product completeness. The extra_reads dual-source ambiguity (low) is retained as a binding spec clarification since it affects observable behavior. The PacketPlan frozen-dataclass refactoring impact (medium) and the trimmed-packet integration test (low) are acknowledged as valid but deferred to eng-review ownership; they are implementation/test-coverage concerns that do not change product scope or block approval-readiness, so they are not made binding here."
+}

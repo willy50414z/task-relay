@@ -27,6 +27,7 @@ python -m pip install -e .
 ```bash
 trly --help
 trly health --json
+trly doctor
 ```
 
 ## Quick start
@@ -104,9 +105,17 @@ trly install
 trly install --targets codex,claude --scope project --feature review,apply \
   --review-chain claude=claude-opus-4-8 --apply-chain deepseek=deepseek-v4-pro[1m]
 
+# Validate the generated setup before first delegated run
+trly doctor
+
+# Run one bounded OpenSpec apply task through the configured apply chain
+trly apply --change <change> --task <task-id>
+
 # Uninstall delegation guidance
 trly uninstall
 ```
+
+After `trly install`, task-relay now prints next-step guidance and a cheap validation summary so setup issues are surfaced before the first real review/apply run.
 
 ## Python API reference
 
@@ -255,6 +264,9 @@ All errors inherit from `TaskRelayError(RuntimeError)`.
 task-relay stores configuration in managed blocks within agent guidance files (no config file needed). Run `trly install` to set up delegation with an arrow-key interactive wizard.
 
 詳細的安裝與設定說明請參閱 **[docs/install.md](docs/install.md)**。
+Review / Apply 功能總覽請參閱 **[docs/review-apply.md](docs/review-apply.md)**。
+
+For preflight checks after install, use `trly doctor`. For higher-level OpenSpec implementation delegation, use `trly apply --change <change> --task <task-id>`. For packed-vs-full context measurement, use `trly pack-benchmark --eval-set <file>`.
 
 Example managed block:
 
@@ -305,19 +317,21 @@ trly pack --mode {review-proposal,implementation-draft,test-draft,review,diagnos
 ```
 
 - `--change` — OpenSpec change name under `openspec/changes/`
-- 預設會只 inline 目標 task block、`design.md` 的 `Decisions` / `Risks / Trade-offs` / `Open Questions`，以及相關 delta spec；若無法判斷 spec 關聯性，會 fallback 到所有 specs，並在 packet header 顯示 `Scope note:`
+- 預設會只 inline 目標 task block、`design.md` 的關鍵段落，以及相關 delta spec；若無法判斷 spec 關聯性，會 fallback 到所有 specs，並在 packet header 顯示 `Scope note:`
 - `--read PATH` — repeatable; inline an extra repo file (errors if unresolvable)
 - `--full-change-context` — restore the previous whole-change inline behavior
 - `--diff-file FILE` / `--diff-from REF` — for `test-draft`, add changed repo files as point-to references and report the dynamic source in dry-run diagnostics
-- `--model-resolver` — opt-in last-resort resolver for ambiguous spec selection; default is off
+- `--model-resolver` — opt-in last-resort resolver for ambiguous spec selection; default is off. Accepted model selections can now add spec picks, design sections, task dependencies, and extra reads.
 - `--model-call-limit N` — per-pack model resolver call limit; `0` records a skipped resolver instead of calling a model
 - `--model-result FILE` — structured resolver result JSON for validation/testing without a live model call
-- `--dry-run --json` — report selected sections, estimated bytes, selection mode, spec candidates, missing signals, repo context gaps, dynamic diff source, and model resolver diagnostics without emitting the full packet
+- `--dry-run --json` — report selected sections, estimated bytes, selection mode, spec candidates, missing signals, repo context gaps, dynamic diff source, model resolver diagnostics, budget status, budget limit, and trimmed sections without emitting the full packet
 - `--out` — write to a file instead of stdout; the result is consumable by `trly run --prompt-file`
+
+Packer defaults now enforce a byte budget per mode. Optional context is trimmed deterministically in this order: model extra reads, CLI extra reads, dynamic diff refs, non-core design sections, then lower-ranked specs. If required core context still exceeds budget, `build_packet()` fails with a machine-readable budget violation.
 
 ### `trly pack-lint`
 
-Run advisory diagnostics for packer signals and fallback behavior. This command reports issues but does not edit artifacts or block delegation by default.
+Run advisory diagnostics for packer signals, fallback behavior, budget trimming, and JSON-only sidecar traps.
 
 ```
 trly pack-lint --change CHANGE [--task TASK] [--mode MODE] --json [--cwd DIR]
@@ -331,7 +345,7 @@ Evaluate scope selection against a labeled eval set. The eval set is JSON with `
 trly pack-metrics --eval-set tests/fixtures/packer_eval.json --json [--cwd DIR]
 ```
 
-The report includes spec/task-block precision and recall, fallback rate, average packet bytes, secondary design-section recall, sample count, category coverage, and per-example details.
+The report includes compatibility metrics plus nested `selection_accuracy`, `context_cost`, and `quality_outcome` sections.
 
 ### `trly evaluate`
 
