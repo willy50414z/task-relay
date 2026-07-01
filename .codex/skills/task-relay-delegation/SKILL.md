@@ -22,28 +22,14 @@ Global timeout: `900` seconds.
 
 ### Apply Chain
 
-- primary: **codex** (model: gpt-5.5-medium)
-- fallback 1: **deepseek** (model: deepseek-v4-pro[1m])
+- primary: **deepseek** (model: deepseek-v4-pro[1m])
+- fallback 1: **codex** (model: gpt-5.5-medium)
 
 ### Primary Execution Workflow
 
 The primary agent should use task-relay explicitly rather than asking a
 delegate from free-form chat. Package context first, then run the selected
 chain target with the packet file.
-
-#### Review
-
-When review is enabled, OpenSpec propose workflows invoke `$trly-review`
-after proposal artifacts are written. OpenSpec explore remains primary-only.
-
-The review command is:
-
-```bash
-trly review-gate --change <change>
-```
-
-`$trly-review` owns the full review workflow, including applying arbiter
-revision contracts and reporting reviewer/arbiter output.
 
 #### Apply
 
@@ -67,8 +53,9 @@ Lower-level commands remain available for diagnostics and custom workflows:
 
 ```bash
 trly pack --mode implementation-draft --change <change> --task <task-id> --out <packet>
-trly run --target codex --prompt-file <packet> --isolate --base <base-ref>
+trly run --target deepseek --prompt-file <packet> --isolate --base <base-ref>
 ```
+
 
 ### Post-Install Validation
 
@@ -86,7 +73,6 @@ setup issues fail before the first real delegated run.
 
 When receiving a delegation prompt packet, produce ONE of:
 
-- **review-proposal**: Review a proposal for clarity, correctness, and completeness.
 - **implementation-draft**: A patch or file-by-file edit plan.
 - **test-draft**: Tests to add and the command to run them.
 - **review**: Findings against a diff or spec, with severity.

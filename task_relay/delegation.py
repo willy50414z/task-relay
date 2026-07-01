@@ -404,7 +404,7 @@ def install_skill_bundle(
     templates_dir.mkdir(exist_ok=True)
     _copy_templates(templates_dir)
     _copy_personas(bundle_root / "personas")
-    if "review" in features and reviewers:
+    if features:
         _install_review_skill_bundle(skill_root)
     else:
         _remove_named_skill_bundle(skill_root, REVIEW_SKILL_NAME)

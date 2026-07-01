@@ -1,4 +1,0 @@
-interface:
-  display_name: "trly review"
-  short_description: "Task Relay post-propose review"
-  default_prompt: "Use $trly-review to review an OpenSpec change before apply."

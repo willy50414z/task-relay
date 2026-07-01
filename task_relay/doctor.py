@@ -355,7 +355,7 @@ def _path_checks(
             ))
             features = _features_for_path(blocks, agent, candidate_scope)
             split_skills = []
-            if "review" in features:
+            if features:
                 split_skills.append("trly-review")
             if "apply" in features:
                 split_skills.append("trly-apply")
