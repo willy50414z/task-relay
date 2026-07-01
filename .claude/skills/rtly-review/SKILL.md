@@ -14,7 +14,7 @@ allowed-tools:
   - AskUserQuestion
 ---
 
-# /rtly:review
+# /trly:review
 
 Run the task-relay review gate against an OpenSpec change. Invokes parallel
 reviewers followed by arbiter arbitration, producing a PASS / CONCERNS /
@@ -23,40 +23,47 @@ BLOCKED decision.
 ## Usage
 
 ```
-/rtly:review --change <change-name>
-/rtly:review --change <change-name> --target zerotoken
-/rtly:review --change <change-name> --target deepseek --no-save
+/trly:review --change <change-name>
+/trly:review --change <change-name> --reviewers claude:/review --arbiter claude:/plan-eng-review
+/trly:review --change <change-name> --reviewers deepseek:/review --arbiter claude:/plan-eng-review --save
 ```
 
-## Cold-start (first run)
+## Interactive Selection
 
-If the project has no task-relay managed block in AGENTS.md, the skill MUST
-guide the user through a minimal interactive setup before running the review:
+Before running the review, ask the user to choose the routing for this run:
 
-1. Detect: run `grep -q "task-relay:start" AGENTS.md 2>/dev/null`. If exit code != 0, AGENTS.md has no managed block.
-2. If no managed block exists:
-   a. Tell the user: "No task-relay config found. Quick setup (2 questions):"
-   b. Ask: "Which agent for review? [claude / deepseek / zerotoken]" (default: claude)
-   c. Ask: "Which agent for arbiter? [claude / deepseek / zerotoken]" (default: claude)
-   d. Write the minimal managed block to AGENTS.md via `trly install --targets <primary> --scope project --feature review --review-chain <review-agent>`
-   e. Proceed with review.
-3. If managed block exists, proceed directly.
+1. Reviewer agent and persona, in `agent:/persona` form.
+   - Default reviewer persona: `/review`.
+   - Examples: `claude:/review`, `deepseek:/review`, `codex:/review=gpt-5.5-high`.
+2. Arbiter agent and persona, in `agent:/persona` form.
+   - Default arbiter chain: `claude:/plan-ceo-review`, then `claude:/plan-eng-review`.
+   - Examples: `claude:/plan-eng-review`, `deepseek:/review-arbiter`.
+3. Whether to save this run's reviewer/arbiter settings for future reviews.
 
-## Per-invocation override
+Do not use the install wizard to configure review routing. Use the answers to
+build a `trly review` command for this run.
 
-- `--target <agent>` — override the review agent for this run, persist to AGENTS.md
-- `--model <model>` — override the model, persist to AGENTS.md
-- `--no-save` — one-time override, do not persist
+## Cold-start
+
+If the project has no task-relay managed block, the review can still run with
+explicit reviewer and arbiter selections. If the user chooses to save and no
+managed block exists yet, ask where to save it:
+
+- install target: `codex` or `claude`
+- scope: `project` or `user`
+
+Then pass `--save-targets <target> --save-scope <scope>` with `--save`.
 
 ## Execution
 
-Run the review gate via the existing CLI:
+Run the review gate via `trly review`:
 
 ```bash
-trly review-gate --change <change-name> --json
+trly review --change <change-name> --reviewers <agent:/persona> --arbiter <agent:/persona> --json
 ```
 
-If `--target` is specified, pass it as `--reviewers <agent>`.
+If the user chose to save, add `--save`. If no managed block exists yet, also
+add `--save-targets <target> --save-scope <scope>`.
 
 After the review completes, read the output JSON and present a summary:
 - **PASS** → "All reviewers passed. Proceed to apply."
@@ -65,10 +72,10 @@ After the review completes, read the output JSON and present a summary:
 
 ## Configuration
 
-The skill reads reviewer/arbiter configuration from the AGENTS.md managed block.
-To view or modify the full workflow config, use:
+The skill reads reviewer/arbiter defaults from the managed block when present,
+but every invocation should still confirm the reviewer and arbiter selection
+with the user. To view the full workflow config, use:
 
 ```bash
 trly dev steps      # list all workflow step configs
-trly dev config --step review --target zerotoken  # change review agent
 ```

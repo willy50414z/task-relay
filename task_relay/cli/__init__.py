@@ -16,6 +16,8 @@ from task_relay.delegation import InstallResult, clear, install, parse_existing_
 from task_relay.doctor import build_doctor_report, summarize_validation
 from task_relay.review_config import (
     DEFAULT_GLOBAL_TIMEOUT,
+    DEFAULT_REVIEWER_PERSONA,
+    ReviewGateConfig,
     ReviewRoleEntry,
     default_arbiter_entries,
     migrate_legacy_review_chain,
@@ -182,9 +184,16 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
 
     review_parser = subparsers.add_parser("review", help="Run review against an OpenSpec change (convenience wrapper for review-gate).")
     review_parser.add_argument("--change", required=True, help="OpenSpec change name")
-    review_parser.add_argument("--target", help="Override review agent")
-    review_parser.add_argument("--model", help="Override model")
-    review_parser.add_argument("--no-save", action="store_true", help="One-time override, do not persist to AGENTS.md")
+    review_parser.add_argument("--reviewers", help="Reviewer entries for this run: agent[:/persona][=model],...")
+    review_parser.add_argument("--arbiter", action="append", default=[], help="Arbiter entries for this run. Repeatable or comma-separated.")
+    review_parser.add_argument("--target", help="Backward-compatible reviewer agent override")
+    review_parser.add_argument("--model", help="Apply a model override to selected reviewers")
+    review_parser.add_argument("--global-timeout", type=int, help="Global timeout in seconds for this review gate.")
+    save_group = review_parser.add_mutually_exclusive_group()
+    save_group.add_argument("--save", action="store_true", help="Persist the selected reviewer/arbiter config after a successful run.")
+    save_group.add_argument("--no-save", action="store_true", help="One-time override, do not persist to AGENTS.md")
+    review_parser.add_argument("--save-targets", type=parse_install_targets, help="When creating a new saved config, install targets (claude,codex).")
+    review_parser.add_argument("--save-scope", choices=["user", "project"], help="When creating or filtering saved config, installation scope.")
     review_parser.add_argument("--cwd", help="Project root (defaults to current dir)")
     review_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     review_parser.set_defaults(handler=handle_review)
@@ -800,22 +809,13 @@ def handle_dev_config(args) -> int:
 
 def handle_review(args) -> int:
     """trly review — convenience wrapper for review-gate with per-step config."""
-    from task_relay.workflow.run_review import is_configured, run_review
-
-    if not is_configured(cwd=args.cwd):
-        print("No task-relay config found. Starting cold-start setup...")
-        print("Run 'trly install' for full configuration, or specify --target directly.")
-        if not args.target:
-            print("Error: --target is required when no config exists.", file=sys.stderr)
-            return 1
+    saved_results: list[InstallResult] = []
 
     try:
-        result = run_review(
-            args.change,
-            target=getattr(args, "target", None),
-            model=getattr(args, "model", None),
-            cwd=args.cwd,
-        )
+        config = _review_config_from_review_args(args)
+        result = run_review_gate(args.change, cwd=args.cwd, config=config)
+        if getattr(args, "save", False):
+            saved_results = _persist_review_config(config, args)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -827,18 +827,143 @@ def handle_review(args) -> int:
             "result_path": str(result.result_path),
             "reviewers": [str(item.path) for item in result.reviewer_artifacts],
             "arbiters": [str(item.path) for item in result.arbiter_artifacts],
+            "saved_config_paths": [str(item.guidance_path) for item in saved_results],
         }
         sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     else:
         print(f"Decision: {result.decision}")
         print(f"Summary:  {result.summary_path}")
         print(f"Result:   {result.result_path}")
+        for item in saved_results:
+            print(f"Saved review config: {item.guidance_path}")
         if result.decision == "REVISE":
             for arbiter in result.arbiter_artifacts:
                 for item in arbiter.payload.get("actionable_items", []):
                     print(f"  - {item.get('target_artifact')}: {item.get('required_change')}")
 
     return 0 if result.decision == "APPROVE" else 1
+
+
+def _review_config_from_review_args(args) -> ReviewGateConfig:
+    if getattr(args, "reviewers", None) and getattr(args, "target", None):
+        raise ValueError("--reviewers cannot be combined with --target")
+
+    from task_relay.errors import ReviewGateConfigError
+    from task_relay.workflow.review_gate import load_review_gate_config
+
+    base_config: ReviewGateConfig | None = None
+    reviewers: tuple[ReviewRoleEntry, ...]
+
+    if getattr(args, "reviewers", None):
+        reviewers = tuple(parse_role_entries(args.reviewers))
+    else:
+        try:
+            base_config = load_review_gate_config(getattr(args, "cwd", None))
+        except ReviewGateConfigError:
+            base_config = None
+
+        target = getattr(args, "target", None)
+        if base_config:
+            reviewers = tuple(
+                ReviewRoleEntry(
+                    agent=target or entry.agent,
+                    persona=entry.persona,
+                    model=getattr(args, "model", None) or entry.model,
+                )
+                for entry in base_config.reviewers
+            )
+        elif target:
+            reviewers = (
+                ReviewRoleEntry(
+                    agent=target,
+                    persona=DEFAULT_REVIEWER_PERSONA,
+                    model=getattr(args, "model", None),
+                ),
+            )
+        else:
+            raise ValueError(
+                "No task-relay review config found. Specify --reviewers or run `trly install --feature review`."
+            )
+
+    if getattr(args, "model", None) and getattr(args, "reviewers", None):
+        reviewers = tuple(
+            ReviewRoleEntry(agent=entry.agent, persona=entry.persona, model=args.model)
+            for entry in reviewers
+        )
+
+    arbiters = tuple(_parse_repeatable_role_entries(getattr(args, "arbiter", None) or []))
+    if not arbiters:
+        arbiters = base_config.arbiters if base_config else tuple(default_arbiter_entries())
+
+    timeout = getattr(args, "global_timeout", None)
+    if timeout is None:
+        timeout = base_config.global_timeout if base_config else DEFAULT_GLOBAL_TIMEOUT
+
+    return ReviewGateConfig(reviewers=reviewers, arbiters=arbiters, global_timeout=int(timeout))
+
+
+def _persist_review_config(config: ReviewGateConfig, args) -> list[InstallResult]:
+    cwd = Path(args.cwd) if args.cwd else Path.cwd()
+    candidates = _review_save_candidates(
+        cwd,
+        target_filter=list(getattr(args, "save_targets", None) or []),
+        scope_filter=getattr(args, "save_scope", None),
+    )
+
+    if not candidates:
+        targets = list(getattr(args, "save_targets", None) or [])
+        scope = getattr(args, "save_scope", None)
+        if not targets or not scope:
+            raise ValueError("--save requires an existing managed block, or both --save-targets and --save-scope")
+        candidates = [
+            {
+                "primary": target,
+                "scope": scope,
+                "features": [],
+                "apply_chain": [],
+                "global_timeout": config.global_timeout,
+            }
+            for target in targets
+        ]
+
+    results: list[InstallResult] = []
+    for candidate in candidates:
+        features = list(candidate.get("features") or [])
+        if "review" not in features:
+            features.append("review")
+        results.append(
+            install(
+                primary_agent=candidate["primary"],
+                scope=candidate["scope"],
+                features=features,
+                reviewers=list(config.reviewers),
+                arbiters=list(config.arbiters),
+                apply_chain=list(candidate.get("apply_chain") or []),
+                global_timeout=config.global_timeout,
+                cwd=cwd,
+            )
+        )
+    return results
+
+
+def _review_save_candidates(cwd: Path, *, target_filter: list[str], scope_filter: str | None) -> list[dict]:
+    scopes = [scope_filter] if scope_filter else ["project", "user"]
+    candidates: list[dict] = []
+    for scope in scopes:
+        for target in INSTALL_TARGETS:
+            if target_filter and target not in target_filter:
+                continue
+            guidance_path, _ = resolve_install_paths(target, scope, cwd)
+            parsed = parse_existing_block(guidance_path)
+            if not parsed:
+                continue
+            candidate = dict(parsed)
+            candidate["primary"] = candidate.get("primary") or target
+            candidate["scope"] = candidate.get("scope") or scope
+            candidates.append(candidate)
+        if candidates and not scope_filter:
+            break
+    return candidates
 
 
 
