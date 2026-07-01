@@ -5,6 +5,7 @@ task_relay/core.py
 task_relay/delegation.py
 task_relay/doctor.py
 task_relay/errors.py
+task_relay/jobs.py
 task_relay/models.py
 task_relay/packer.py
 task_relay/packer_eval.py
@@ -23,6 +24,7 @@ task_relay.egg-info/entry_points.txt
 task_relay.egg-info/requires.txt
 task_relay.egg-info/top_level.txt
 task_relay/agents/__init__.py
+task_relay/agents/anthropic_sdk.py
 task_relay/agents/base.py
 task_relay/agents/claude.py
 task_relay/agents/codex.py
@@ -30,7 +32,6 @@ task_relay/agents/common.py
 task_relay/agents/deepseek.py
 task_relay/agents/zerotoken.py
 task_relay/assets/__init__.py
-task_relay/assets/__pycache__/__init__.cpython-312.pyc
 task_relay/assets/__pycache__/__init__.cpython-314.pyc
 task_relay/assets/task-relay-delegation/agents/claude.yaml
 task_relay/assets/task-relay-delegation/agents/deepseek.yaml
@@ -52,18 +53,22 @@ task_relay/cli/apply.py
 task_relay/cli/doctor.py
 task_relay/cli/evaluate.py
 task_relay/cli/health.py
+task_relay/cli/jobs.py
 task_relay/cli/pack.py
 task_relay/cli/run.py
 task_relay/cli/trace.py
 task_relay/workflow/__init__.py
 task_relay/workflow/review_gate.py
 task_relay/workflow/run_review.py
+tests/test_anthropic_sdk_runner.py
 tests/test_apply.py
 tests/test_cli_install.py
 tests/test_delegation.py
 tests/test_doctor.py
+tests/test_jobs.py
 tests/test_output_verification.py
 tests/test_packer.py
+tests/test_packer_eval.py
 tests/test_quota.py
 tests/test_review_gate.py
 tests/test_run_review_wrapper.py

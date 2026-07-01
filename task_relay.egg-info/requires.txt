@@ -1,1 +1,2 @@
+anthropic<1,>=0.57
 questionary<3,>=2

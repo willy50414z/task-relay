@@ -4,6 +4,7 @@ Version: 0.2.0
 Summary: Structured agent task runner with outcome routing via file signals
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: anthropic<1,>=0.57
 Requires-Dist: questionary<3,>=2
 
 # task-relay
@@ -300,7 +301,7 @@ Run a raw prompt against an agent target.
 trly run (--target {claude,codex,deepseek} | --targets TARGETS)
          (--prompt TEXT | --prompt-file PATH | --stdin)
          [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--cwd DIR]
-         [--expect-output PATH ...] [--isolate] [--allow-dirty]
+         [--expect-output PATH ...] [--isolate] [--allow-dirty] [--background]
 ```
 
 - `--target` / `--targets` — mutually exclusive; `--targets` accepts comma-separated fallback list
@@ -310,6 +311,29 @@ trly run (--target {claude,codex,deepseek} | --targets TARGETS)
 - `--expect-output PATH` — repeatable; after the run, verify the agent created this non-empty file and fail loudly otherwise (backstops the review path, which has no checkbox)
 - `--isolate` — run the delegate in an ephemeral git worktree on a throwaway branch `tr/<id>` with `git push` neutralized; its edits never touch the real working tree, and the primary reviews/merges the branch. An empty branch fails loudly.
 - `--allow-dirty` — with `--isolate`, proceed from clean `HEAD` even if the main working tree has local changes; without it, a dirty tree stops the delegation before any worktree/branch is created.
+- `--background` — start a supported raw delegate run as a job session and print the job id without waiting. Background mode is for manual runs; review/apply orchestration remains blocking.
+
+Every delegated subprocess is recorded as a local job session under `.task_relay/jobs/`, with metadata and logs that can be inspected while it is still running.
+
+### `trly jobs`
+
+Inspect and manage live or recently completed delegated subprocesses.
+
+```
+trly jobs list [--cwd DIR]
+trly jobs status JOB_ID [--cwd DIR]
+trly jobs logs JOB_ID [--stream stdout|stderr|combined] [--tail N] [--follow] [--cwd DIR]
+trly jobs stop JOB_ID [--cwd DIR]
+trly jobs cleanup [--older-than DAYS] [--status STATUS] [--cwd DIR]
+```
+
+- `list` — show recent jobs with status, target, role/change, age, and log path
+- `status` — show detailed metadata including pid, exit code, expected outputs, and log paths
+- `logs --tail 200 --follow` — tail a long-running reviewer/apply delegate while it runs
+- `stop` — terminate the delegated process tree and mark the job as `killed`
+- `cleanup` — remove old job session files from `.task_relay/jobs/`
+
+Use `trly jobs` for live/log/process inspection. Use `trly trace --summary` for after-the-fact aggregate duration, token, cost, retry, and per-agent totals.
 
 ### `trly pack`
 
@@ -459,6 +483,7 @@ task_relay/
     ├── __init__.py      # Argument parser, main()
     ├── __main__.py      # python -m task_relay.cli entry point
     ├── run.py           # handle_run()
+    ├── jobs.py          # handle_jobs()
     ├── evaluate.py      # handle_evaluate(), JSON serialization
     └── health.py        # handle_health()
 ```
@@ -475,11 +500,11 @@ task_relay/
 
 ### Quota retry
 
-When a subprocess stderr matches known quota/rate-limit patterns (e.g. "exceeded your current quota", "429", "rate limit exceeded"), the runner retries up to `LLM_QUOTA_MAX_RETRIES` times (default 288) with `LLM_QUOTA_RETRY_INTERVAL` seconds between attempts (default 300). Configure via environment variables.
+When a subprocess stderr/stdout matches known quota/rate-limit patterns, the runner classifies it as transient throttling (for example `429`, `Retry-After`, service unavailable) or hard exhaustion (for example out of credits or monthly token limit). Transient throttling retries briefly with exponential backoff. Hard exhaustion waits within a bounded wall-time budget by default, or can fast-fallback to the next configured target when `LLM_FAST_FALLBACK=1`.
 
 ## Non-goals (v0.2)
 
-- No async queue or job store
+- No daemonized distributed queue or web job dashboard
 - No HTTP API or webhook runtime
 - No browser relay / `opencli` runtime support
 - No plugin discovery for third-party adapters
