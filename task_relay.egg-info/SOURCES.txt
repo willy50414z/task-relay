@@ -32,6 +32,7 @@ task_relay/agents/common.py
 task_relay/agents/deepseek.py
 task_relay/agents/zerotoken.py
 task_relay/assets/__init__.py
+task_relay/assets/__pycache__/__init__.cpython-312.pyc
 task_relay/assets/__pycache__/__init__.cpython-314.pyc
 task_relay/assets/task-relay-delegation/agents/claude.yaml
 task_relay/assets/task-relay-delegation/agents/deepseek.yaml

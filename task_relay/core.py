@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from task_relay import agents
@@ -14,6 +14,20 @@ from task_relay.types import AgentRunRequest, AgentRunResult, JobResult, Outcome
 from task_relay.workspace import cleanup_workspace, create_workspace
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class IsolatedRunResult:
+    stdout: str
+    branch: str
+    target: str
+    model: str | None = None
+    retries: int = 0
+    job_id: str | None = None
+    log_path: str | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
 
 
 def _trace_usage_value(value):
@@ -121,11 +135,38 @@ def run_isolated(
     primary integrates by diffing/merging the branch. The worktree directory is removed
     after the run (the branch and its commit persist) unless `TASK_RELAY_KEEP_IO=1`.
     """
+    result = run_isolated_detailed(
+        target=target,
+        prompt=prompt,
+        targets=targets,
+        model=model,
+        effort=effort,
+        timeout=timeout,
+        cwd=cwd,
+        allow_dirty=allow_dirty,
+        base=base,
+    )
+    return result.stdout, result.branch
+
+
+def run_isolated_detailed(
+    target: str | None = None,
+    prompt: str = "",
+    *,
+    targets: list[str] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    timeout: float = 1800,
+    cwd: str | None = None,
+    allow_dirty: bool = False,
+    base: str = "HEAD",
+) -> IsolatedRunResult:
+    """Run isolated delegation and return branch plus delegate job metadata."""
     from task_relay import worktree as wt
 
     selected = targets if targets is not None else ([target] if target is not None else [])
     if not selected:
-        raise ValueError("run_isolated() requires 'target' or 'targets'.")
+        raise ValueError("run_isolated_detailed() requires 'target' or 'targets'.")
     if not prompt.strip():
         raise ValueError("prompt must not be empty.")
 
@@ -167,7 +208,19 @@ def run_isolated(
         raise DelegationOutputError(
             f"delegation produced no changes (branch {branch} is empty).{detail}"
         )
-    return result.stdout, branch
+    usage = result.usage
+    return IsolatedRunResult(
+        stdout=result.stdout,
+        branch=branch,
+        target=result.target,
+        model=result.model,
+        retries=result.retries,
+        job_id=result.job_id,
+        log_path=result.log_path,
+        tokens_in=usage.input_tokens if usage else None,
+        tokens_out=usage.output_tokens if usage else None,
+        cost_usd=usage.cost_usd if usage else None,
+    )
 
 
 def verify_expected_output(expected: list[str], *, cwd: str | None = None) -> None:

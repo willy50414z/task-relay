@@ -222,6 +222,11 @@ class PacketPlan:
             ],
         }
 
+    def render(self, *, cache_layout: bool = False) -> str:
+        if cache_layout:
+            return _build_cache_packet(self)
+        return _build_flat_packet(self)
+
 
 def _load_template(mode: str) -> str:
     if mode not in VALID_MODES:
@@ -1264,6 +1269,4 @@ def build_packet(
             )
         )
 
-    if cache_layout:
-        return _build_cache_packet(plan)
-    return _build_flat_packet(plan)
+    return plan.render(cache_layout=cache_layout)

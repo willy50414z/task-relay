@@ -28,6 +28,27 @@ class ReviewGateConfig:
     legacy_review_chain: tuple[tuple[str, str | None], ...] = ()
 
 
+@dataclass(frozen=True)
+class ReviewSettingRow:
+    role: str
+    agent: str
+    model: str
+    effort: str
+    personas: str
+
+
+PERSONA_ALIASES: dict[str, str] = {
+    "review": "/review",
+    "cso": "/cso",
+    "qa": "/qa-only",
+    "qa-only": "/qa-only",
+    "ceo": "/plan-ceo-review",
+    "engineer": "/plan-eng-review",
+    "plan-ceo-review": "/plan-ceo-review",
+    "plan-eng-review": "/plan-eng-review",
+}
+
+
 def parse_role_entries(value: str) -> list[ReviewRoleEntry]:
     entries: list[ReviewRoleEntry] = []
     for raw_entry in value.split(","):
@@ -53,6 +74,33 @@ def format_role_entries(entries: list[ReviewRoleEntry] | tuple[ReviewRoleEntry, 
             value = f"{value}={entry.model}"
         formatted.append(value)
     return ", ".join(formatted)
+
+
+def normalize_persona_alias(value: str) -> str:
+    persona = value.strip()
+    if not persona:
+        raise ValueError("persona cannot be empty")
+    key = persona.removeprefix("/").strip()
+    if not key:
+        raise ValueError("persona cannot be a bare slash")
+    return PERSONA_ALIASES.get(key, f"/{key}")
+
+
+def review_setting_rows(config: ReviewGateConfig) -> list[ReviewSettingRow]:
+    rows: list[ReviewSettingRow] = []
+    rows.extend(_entry_rows("reviewer", config.reviewers))
+    rows.extend(_entry_rows("arbiter", config.arbiters))
+    return rows
+
+
+def format_review_setting_table(config: ReviewGateConfig) -> str:
+    lines = [
+        "| Role | Agent | Model | Effort | Personas |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in review_setting_rows(config):
+        lines.append(f"| {row.role} | {row.agent} | {row.model} | {row.effort} | {row.personas} |")
+    return "\n".join(lines)
 
 
 def migrate_legacy_review_chain(
@@ -84,6 +132,44 @@ def _split_agent_persona(entry: str) -> tuple[str, str | None]:
         raise ValueError(f"invalid role entry: {entry!r}")
     if not persona:
         raise ValueError(f"invalid role entry: {entry!r}")
-    if not persona.startswith("/"):
-        persona = f"/{persona}"
-    return agent, persona
+    return agent, normalize_persona_alias(persona)
+
+
+def _entry_rows(role: str, entries: tuple[ReviewRoleEntry, ...]) -> list[ReviewSettingRow]:
+    return [
+        ReviewSettingRow(
+            role=role,
+            agent=entry.agent,
+            model=_display_model(entry),
+            effort=_display_effort(entry),
+            personas=_display_persona(entry.persona),
+        )
+        for entry in entries
+    ]
+
+
+def _display_model(entry: ReviewRoleEntry) -> str:
+    model = entry.model or "default"
+    if entry.agent == "codex":
+        base, effort = _split_codex_effort(model)
+        if effort:
+            return base
+    return model
+
+
+def _display_effort(entry: ReviewRoleEntry) -> str:
+    if entry.agent != "codex" or not entry.model:
+        return "n/a"
+    _, effort = _split_codex_effort(entry.model)
+    return effort or "n/a"
+
+
+def _display_persona(persona: str | None) -> str:
+    return (persona or DEFAULT_REVIEWER_PERSONA).removeprefix("/")
+
+
+def _split_codex_effort(model: str) -> tuple[str, str | None]:
+    base, sep, suffix = model.rpartition("-")
+    if sep and suffix in {"high", "medium", "fast"} and base:
+        return base, suffix
+    return model, None
