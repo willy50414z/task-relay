@@ -1,0 +1,55 @@
+{
+  "change": "change-x",
+  "decision": "APPROVE",
+  "apply_allowed": true,
+  "requires_primary_revision": false,
+  "review_profile": "standard",
+  "arbiter_profile": "engineering",
+  "profile_source": "default",
+  "arbiter_source": "profile",
+  "selected_reviewer_personas": [
+    "/review",
+    "/devils-advocate"
+  ],
+  "selected_arbiter_personas": [
+    "/plan-eng-review"
+  ],
+  "selected_review_agent": {
+    "agent": "codex",
+    "model": "gpt-test"
+  },
+  "reducer": {
+    "decision": "ARBITRATE",
+    "arbiter_invoked": true,
+    "skip_reason": null,
+    "trigger": "concerns"
+  },
+  "arbiter_invoked": true,
+  "arbiter_skip_reason": null,
+  "retry_attempts": [],
+  "abandoned_reviewers": [],
+  "reviewers": [
+    {
+      "id": "codex_review",
+      "path": "\\tmp\\codex_review.json",
+      "reviewer": "codex:/review",
+      "agent": "codex",
+      "persona": "/review",
+      "model": "gpt-test",
+      "verdict": "CONCERNS"
+    }
+  ],
+  "arbiters": [
+    {
+      "id": "claude_plan_eng_review",
+      "path": "\\tmp\\claude_plan_eng_review.json",
+      "agent": "claude",
+      "persona": "/plan-eng-review",
+      "model": null,
+      "decision": "APPROVE",
+      "summary": "arbiter summary"
+    }
+  ],
+  "actionable_items": [],
+  "target_artifacts": []
+}

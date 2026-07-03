@@ -1,0 +1,43 @@
+{
+  "change": "change-x",
+  "decision": "APPROVE",
+  "apply_allowed": true,
+  "requires_primary_revision": false,
+  "review_profile": "standard",
+  "arbiter_profile": "engineering",
+  "profile_source": "default",
+  "arbiter_source": "manual_override",
+  "selected_reviewer_personas": [
+    "/review",
+    "/devils-advocate"
+  ],
+  "selected_arbiter_personas": [],
+  "selected_review_agent": {
+    "agent": "codex",
+    "model": null
+  },
+  "reducer": {
+    "decision": "APPROVE",
+    "arbiter_invoked": false,
+    "skip_reason": "all reviewer artifacts passed",
+    "trigger": "all_pass"
+  },
+  "arbiter_invoked": false,
+  "arbiter_skip_reason": "all reviewer artifacts passed",
+  "retry_attempts": [],
+  "abandoned_reviewers": [],
+  "reviewers": [
+    {
+      "id": "codex_review",
+      "path": "\\tmp\\codex_review.json",
+      "reviewer": "codex:/review",
+      "agent": "codex",
+      "persona": "/review",
+      "model": "gpt-test",
+      "verdict": "PASS"
+    }
+  ],
+  "arbiters": [],
+  "actionable_items": [],
+  "target_artifacts": []
+}

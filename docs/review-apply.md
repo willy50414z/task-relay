@@ -38,6 +38,8 @@ trly review-gate --change <change>
 - `--reviewers ...`
 - `--arbiter ...`
 - `--global-timeout <seconds>`
+- `--review-profile lite|standard|qa|security|strict`
+- `--arbiter-profile engineering|product|strict`
 - `--verify-revision`
 - `--json`
 
@@ -82,10 +84,24 @@ trly pack --mode implementation-draft --change <change> --task <task-id>
 
 從 `AGENTS.md` 或 `CLAUDE.md` 的 managed block 讀取：
 
-- reviewers
-- arbiters
+- reviewers：review execution fallback candidates；profile-based review 會先選一個有效 agent/model，再用它跑所有選中的 personas。
+- arbiters：arbitration execution fallback candidates；只有 reducer 判斷需要 arbitration 時才會執行。
 - global timeout
 - legacy review-chain 相容設定
+
+Reviewer profile 選 personas，不選 agent/model：
+
+- `lite`：`/review`
+- `standard`：`/review`, `/devils-advocate`
+- `qa`：`/review`, `/devils-advocate`, `/qa-only`
+- `security`：`/review`, `/devils-advocate`, `/cso`
+- `strict`：`/review`, `/devils-advocate`, `/qa-only`, `/cso`
+
+Arbiter profile 獨立選 arbitration personas：
+
+- `engineering`：`/plan-eng-review`
+- `product`：`/plan-ceo-review`
+- `strict`：`/plan-eng-review`, `/plan-ceo-review`
 
 ### 2. 打包 review packet
 
@@ -96,22 +112,35 @@ trly pack --mode implementation-draft --change <change> --task <task-id>
 - 相關 `specs/**/*.md`
 - `tasks.md`
 
-### 3. 平行 reviewer 執行
+### 3. 平行 reviewer persona 執行
 
-reviewers 以平行方式執行，各自輸出 JSON artifact 到該 change 的 `review/` 目錄，例如：
+profile-based review 會從 configured reviewers 選一個有效 review agent/model，並用同一個 agent/model 平行執行 profile 展開後的每個 reviewer persona。explicit `--reviewers` 仍是 manual override，會直接使用傳入的 concrete reviewer entries。
+
+每個 persona 各自輸出 JSON artifact 到該 change 的 `review/` 目錄，例如：
 
 - `openspec/changes/<change>/review/delegation_review_<reviewer-id>.json`
 
 每份 reviewer artifact 至少需包含：
 
 - `reviewer`
-- `verdict`
+- `verdict`：`PASS`、`CONCERNS`、或 `BLOCKED`
 - `summary`
 - `findings`
 
-### 4. serial arbiter 決策
+一致性規則：`PASS` 必須是空 findings；`CONCERNS` / `BLOCKED` 必須有 finding 或 persona-specific concern fields；`/devils-advocate` 另需 `fatal_flaw`、`simpler_alternative`、`reverse_case`。delegates 可使用 `task_relay.review_artifacts.write_reviewer_artifact()` 產出穩定 JSON，但 gate 仍會自行驗證。
 
-arbiter 依序讀取 reviewer artifacts，輸出 decision JSON，例如：
+invalid reviewer artifact 會被 retry 一次。retry prompt 會包含 validation errors、required output path、schema rules、valid JSON example，且會透過正常 delegate job 執行，因此 correction request 會出現在 delegate log。第二次仍 invalid 時，該 reviewer persona 會被標記為 abandoned。
+
+### 4. deterministic reducer 與 conditional arbiter
+
+review gate 不再無條件執行 arbiter。它先用 mechanical reducer 判斷：
+
+- 所有 required reviewer personas 都產出 valid `PASS`：直接 `APPROVE`，skip arbitration。
+- 任一 valid reviewer 是 `CONCERNS` 或 `BLOCKED`：執行 selected arbiter profile。
+- 有 abandoned reviewer 且仍有 valid reviewer：執行 selected arbiter profile，並把 abandoned metadata 傳給 arbiter。
+- 所有 reviewers 都 abandoned：gate 失敗，不 approve、不 arbitrate。
+
+arbiter 依序讀取 reviewer artifacts、abandoned metadata、prior arbiter JSON，輸出 decision JSON，例如：
 
 - `openspec/changes/<change>/review/delegation_arbiter_<stage-id>.json`
 
@@ -199,7 +228,7 @@ packet 會盡量只帶：
 - `openspec/changes/<change>/review/delegation_review.md`
 - `openspec/changes/<change>/review/delegation_review_<reviewer-id>.json`
 - `openspec/changes/<change>/review/delegation_arbiter_<stage-id>.json`
-- review result JSON
+- review result JSON，包含 reviewer profile、arbiter profile、selected personas、selected review agent、reducer decision、retry attempts、abandoned reviewers、arbiter invocation state、skip reason
 
 ### Apply 產物
 

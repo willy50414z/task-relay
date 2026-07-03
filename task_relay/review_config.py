@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 DEFAULT_REVIEWER_PERSONA = "/review"
+DEFAULT_REVIEW_PROFILE = "standard"
+DEFAULT_ARBITER_PROFILE = "engineering"
 DEFAULT_ARBITER_CHAIN: tuple["ReviewRoleEntry", ...] = (
     # Default arbiters keep product arbitration ahead of engineering arbitration.
     # Model selection remains optional and can be filled by install/wizard callers.
@@ -20,12 +23,30 @@ class ReviewRoleEntry:
         return self.persona or default
 
 
+class ReviewProfile(str, Enum):
+    LITE = "lite"
+    STANDARD = "standard"
+    QA = "qa"
+    SECURITY = "security"
+    STRICT = "strict"
+
+
+class ArbiterProfile(str, Enum):
+    ENGINEERING = "engineering"
+    PRODUCT = "product"
+    STRICT = "strict"
+
+
 @dataclass(frozen=True)
 class ReviewGateConfig:
     reviewers: tuple[ReviewRoleEntry, ...] = ()
     arbiters: tuple[ReviewRoleEntry, ...] = ()
     global_timeout: int = DEFAULT_GLOBAL_TIMEOUT
     legacy_review_chain: tuple[tuple[str, str | None], ...] = ()
+    review_profile: str = DEFAULT_REVIEW_PROFILE
+    arbiter_profile: str = DEFAULT_ARBITER_PROFILE
+    profile_source: str = "default"
+    arbiter_source: str = "profile"
 
 
 @dataclass(frozen=True)
@@ -39,6 +60,8 @@ class ReviewSettingRow:
 
 PERSONA_ALIASES: dict[str, str] = {
     "review": "/review",
+    "devils-advocate": "/devils-advocate",
+    "devil": "/devils-advocate",
     "cso": "/cso",
     "qa": "/qa-only",
     "qa-only": "/qa-only",
@@ -46,6 +69,22 @@ PERSONA_ALIASES: dict[str, str] = {
     "engineer": "/plan-eng-review",
     "plan-ceo-review": "/plan-ceo-review",
     "plan-eng-review": "/plan-eng-review",
+}
+
+
+REVIEW_PROFILE_PERSONAS: dict[str, tuple[str, ...]] = {
+    ReviewProfile.LITE.value: ("/review",),
+    ReviewProfile.STANDARD.value: ("/review", "/devils-advocate"),
+    ReviewProfile.QA.value: ("/review", "/devils-advocate", "/qa-only"),
+    ReviewProfile.SECURITY.value: ("/review", "/devils-advocate", "/cso"),
+    ReviewProfile.STRICT.value: ("/review", "/devils-advocate", "/qa-only", "/cso"),
+}
+
+
+ARBITER_PROFILE_PERSONAS: dict[str, tuple[str, ...]] = {
+    ArbiterProfile.ENGINEERING.value: ("/plan-eng-review",),
+    ArbiterProfile.PRODUCT.value: ("/plan-ceo-review",),
+    ArbiterProfile.STRICT.value: ("/plan-eng-review", "/plan-ceo-review"),
 }
 
 
@@ -62,6 +101,30 @@ def parse_role_entries(value: str) -> list[ReviewRoleEntry]:
         agent, persona = _split_agent_persona(entry.strip())
         entries.append(ReviewRoleEntry(agent=agent, persona=persona, model=model))
     return entries
+
+
+def normalize_review_profile(value: str | None) -> str:
+    profile = (value or DEFAULT_REVIEW_PROFILE).strip().lower()
+    if profile not in REVIEW_PROFILE_PERSONAS:
+        allowed = ", ".join(sorted(REVIEW_PROFILE_PERSONAS))
+        raise ValueError(f"invalid review profile: {value!r}; expected one of: {allowed}")
+    return profile
+
+
+def normalize_arbiter_profile(value: str | None) -> str:
+    profile = (value or DEFAULT_ARBITER_PROFILE).strip().lower()
+    if profile not in ARBITER_PROFILE_PERSONAS:
+        allowed = ", ".join(sorted(ARBITER_PROFILE_PERSONAS))
+        raise ValueError(f"invalid arbiter profile: {value!r}; expected one of: {allowed}")
+    return profile
+
+
+def reviewer_personas_for_profile(value: str | None) -> tuple[str, ...]:
+    return REVIEW_PROFILE_PERSONAS[normalize_review_profile(value)]
+
+
+def arbiter_personas_for_profile(value: str | None) -> tuple[str, ...]:
+    return ARBITER_PROFILE_PERSONAS[normalize_arbiter_profile(value)]
 
 
 def format_role_entries(entries: list[ReviewRoleEntry] | tuple[ReviewRoleEntry, ...]) -> str:

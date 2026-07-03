@@ -1,0 +1,29 @@
+{
+  "reviewer": "agent:/devils-advocate",
+  "verdict": "CONCERNS",
+  "summary": "One concise sentence summarizing the review result.",
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "scope",
+      "description": "Problem statement.",
+      "recommendation": "Concrete next step."
+    }
+  ],
+  "fatal_flaw": {
+    "assumption": "The assumption that would invalidate the proposal.",
+    "why_fatal": "Why this breaks the proposal.",
+    "evidence_needed": "What must be verified.",
+    "status": "unverified"
+  },
+  "simpler_alternative": {
+    "description": "Smallest viable alternative.",
+    "tradeoff": "What it loses.",
+    "recommendation": "consider"
+  },
+  "reverse_case": {
+    "opposite_approach": "What if we do the opposite?",
+    "when_better": "Conditions where the opposite is better.",
+    "risk": "Risk of ignoring it."
+  }
+}

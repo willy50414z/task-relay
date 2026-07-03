@@ -19,6 +19,8 @@ from task_relay.review_config import (
     DEFAULT_REVIEWER_PERSONA,
     ReviewGateConfig,
     ReviewRoleEntry,
+    normalize_arbiter_profile,
+    normalize_review_profile,
     default_arbiter_entries,
     migrate_legacy_review_chain,
     parse_role_entries,
@@ -189,6 +191,8 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     review_parser.add_argument("--target", help="Backward-compatible reviewer agent override")
     review_parser.add_argument("--model", help="Apply a model override to selected reviewers")
     review_parser.add_argument("--global-timeout", type=int, help="Global timeout in seconds for this review gate.")
+    review_parser.add_argument("--review-profile", choices=["lite", "standard", "qa", "security", "strict"], help="Reviewer persona profile for profile-based review.")
+    review_parser.add_argument("--arbiter-profile", choices=["engineering", "product", "strict"], help="Arbiter persona profile used when arbitration is required.")
     save_group = review_parser.add_mutually_exclusive_group()
     save_group.add_argument("--save", action="store_true", help="Persist the selected reviewer/arbiter config after a successful run.")
     save_group.add_argument("--no-save", action="store_true", help="One-time override, do not persist to AGENTS.md")
@@ -203,6 +207,8 @@ def build_parser(prog: str = "trly") -> argparse.ArgumentParser:
     review_gate_parser.add_argument("--reviewers", help="Override reviewers: agent[:/persona][=model],...")
     review_gate_parser.add_argument("--arbiter", action="append", default=[], help="Override arbiter entries. Repeatable or comma-separated.")
     review_gate_parser.add_argument("--global-timeout", type=int, default=DEFAULT_GLOBAL_TIMEOUT)
+    review_gate_parser.add_argument("--review-profile", choices=["lite", "standard", "qa", "security", "strict"], help="Reviewer persona profile for profile-based review.")
+    review_gate_parser.add_argument("--arbiter-profile", choices=["engineering", "product", "strict"], help="Arbiter persona profile used when arbitration is required.")
     review_gate_parser.add_argument("--cwd", help="Project root containing openspec/ (defaults to current dir)")
     review_gate_parser.add_argument("--json", action="store_true", help="Emit structured JSON result.")
     review_gate_parser.add_argument("--verify-revision", action="store_true", help="Verify whether a prior REVISE contract has been satisfied.")
@@ -899,7 +905,17 @@ def _review_config_from_review_args(args) -> ReviewGateConfig:
     if timeout is None:
         timeout = base_config.global_timeout if base_config else DEFAULT_GLOBAL_TIMEOUT
 
-    return ReviewGateConfig(reviewers=reviewers, arbiters=arbiters, global_timeout=int(timeout))
+    review_profile = normalize_review_profile(getattr(args, "review_profile", None))
+    arbiter_profile = normalize_arbiter_profile(getattr(args, "arbiter_profile", None))
+    return ReviewGateConfig(
+        reviewers=reviewers,
+        arbiters=arbiters,
+        global_timeout=int(timeout),
+        review_profile=review_profile,
+        arbiter_profile=arbiter_profile,
+        profile_source="manual_override" if getattr(args, "reviewers", None) else ("explicit" if getattr(args, "review_profile", None) else "default"),
+        arbiter_source="manual_override" if getattr(args, "arbiter", None) else "profile",
+    )
 
 
 def _persist_review_config(config: ReviewGateConfig, args) -> list[InstallResult]:

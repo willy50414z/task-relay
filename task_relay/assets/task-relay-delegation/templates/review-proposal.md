@@ -33,7 +33,11 @@ and implementation plan completeness from an objective perspective.
 
 ## Output
 - Write review JSON to the unique path declared by the invoking CLI.
+- Prefer the canonical helper when it is importable: `from task_relay.review_artifacts import write_reviewer_artifact`.
+- If the helper is unavailable, still write exactly the same JSON shape yourself.
 - Output JSON only. No prose before or after the JSON object.
+- `PASS` requires an empty `findings` array.
+- `CONCERNS` and `BLOCKED` require at least one finding or persona-specific concern field.
 - Schema:
 
 ```json
@@ -49,6 +53,29 @@ and implementation plan completeness from an objective perspective.
       "recommendation": "concrete next step"
     }
   ]
+}
+```
+
+For `/devils-advocate`, include these additional object fields:
+
+```json
+{
+  "fatal_flaw": {
+    "assumption": "the assumption that could invalidate the proposal",
+    "why_fatal": "why this would break the proposal",
+    "evidence_needed": "what must be checked",
+    "status": "unverified | disproven | acceptable"
+  },
+  "simpler_alternative": {
+    "description": "smallest viable alternative",
+    "tradeoff": "what the simpler path loses",
+    "recommendation": "adopt | consider | reject"
+  },
+  "reverse_case": {
+    "opposite_approach": "what if the proposal did the opposite",
+    "when_better": "conditions where the opposite wins",
+    "risk": "risk of ignoring this case"
+  }
 }
 ```
 
